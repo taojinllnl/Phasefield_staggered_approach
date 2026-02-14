@@ -1004,7 +1004,7 @@ namespace PhaseField
     {}
 
     Vector<double>
-    get_total_solution(const Vector<double> &solution_delta_displacement) const;
+    get_total_solution_u(const Vector<double> &solution_delta_displacement) const;
 
     // Should not make this function const
     void read_material_data(const std::string &data_file,
@@ -1206,7 +1206,7 @@ namespace PhaseField
   }
 
   template <int dim>
-  Vector<double> PhaseFieldSplitSolve<dim>::get_total_solution(
+  Vector<double> PhaseFieldSplitSolve<dim>::get_total_solution_u(
     const Vector<double> &solution_delta_displacement) const
   {
     Vector<double> solution_total_displacement(m_solution_displacement);
@@ -1228,7 +1228,7 @@ namespace PhaseField
   {
     m_timer.enter_subsection("Update QPH data");
 
-    const Vector<double> solution_total_displacement(get_total_solution(solution_delta_displacement));
+    const Vector<double> solution_total_displacement(get_total_solution_u(solution_delta_displacement));
 
     const UpdateFlags uf_UQPH(update_values | update_gradients);
     PerTaskData_UQPH  per_task_data_UQPH;
