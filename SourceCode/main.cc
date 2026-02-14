@@ -29,6 +29,7 @@
 //    after each staggered iteration, we need to check the residuals for the displacement
 //    and the phasefield. The solution converges until both residuals are smaller than
 //    the prescribed tolerance.
+// 5. Add the adaptively mesh refinement option (Feb. 14th, 2026)
 
 #include <deal.II/grid/tria.h>
 #include <deal.II/grid/grid_generator.h>
@@ -157,7 +158,7 @@ namespace PhaseField
       unsigned int m_global_refine_times;
       unsigned int m_local_prerefine_times;
       unsigned int m_max_adaptive_refine_times;
-      unsigned int m_max_allowed_refinement_level;
+      int m_max_allowed_refinement_level;
       double m_phasefield_refine_threshold;
       double m_allowed_max_h_l_ratio;
       unsigned int m_total_material_regions;
@@ -361,10 +362,7 @@ namespace PhaseField
     struct NonlinearSolver
     {
       unsigned int m_max_am_iteration;
-      double       m_phasefield_l2_tol;
       unsigned int m_max_iterations_newton;
-
-      bool m_relative_residual;
 
       double       m_tol_u_residual;
       double       m_tol_d_residual;
@@ -397,11 +395,6 @@ namespace PhaseField
                           "Number of Newton-Raphson iterations allowed for "
                           "displacement subproblem");
 
-        prm.declare_entry("Relative residual",
-			  "yes",
-                          Patterns::Selection("yes|no"),
-			  "Shall we use relative residual for convergence?");
-
         prm.declare_entry("Tolerance displacement residual",
                           "1.0e-9",
                           Patterns::Double(0.0),
@@ -430,9 +423,7 @@ namespace PhaseField
       prm.enter_subsection("Nonlinear solver");
       {
         m_max_am_iteration = prm.get_integer("Max AM iteration");
-        m_phasefield_l2_tol = prm.get_double("Phasefield L2 tolerance");
         m_max_iterations_newton = prm.get_integer("Max iterations Newton-Raphson");
-        m_relative_residual = prm.get_bool("Relative residual");
 
         m_tol_u_residual = prm.get_double("Tolerance displacement residual");
         m_tol_d_residual = prm.get_double("Tolerance phasefield residual");
@@ -784,6 +775,12 @@ namespace PhaseField
 					               current_positive_strain_energy);
     }
 
+    // This is the function used to assign the history variable after remeshing
+    void assign_history_variable(double history_variable_value)
+    {
+      m_history_max_positive_strain_energy = history_variable_value;
+    }
+
     double get_current_positive_strain_energy() const
     {
       return m_material->get_positive_strain_energy();
@@ -914,6 +911,7 @@ namespace PhaseField
     Vector<double> m_solution_phasefield;
     Vector<double> m_solution_displacement;
     Vector<double> m_solution_previous_timestep_phasefield;
+    Vector<double> m_solution_previous_timestep_displacement;
 
     double m_vol_reference;
 
@@ -954,6 +952,7 @@ namespace PhaseField
     void make_grid_case_4();
     void make_grid_case_9();
 
+    void setup_system();
     void setup_system_phasefield();
     void setup_system_displacement();
 
@@ -1002,6 +1001,8 @@ namespace PhaseField
 
     void copy_local_to_global_UQPH(const PerTaskData_UQPH & /*data*/)
     {}
+
+    bool local_refine_and_solution_transfer();
 
     Vector<double>
     get_total_solution_u(const Vector<double> &solution_delta_displacement) const;
@@ -2175,6 +2176,38 @@ namespace PhaseField
   }
 
   template <int dim>
+  void PhaseFieldSplitSolve<dim>::setup_system()
+  {
+    m_timer.enter_subsection("Setup system");
+
+    setup_system_displacement();
+
+    setup_system_phasefield();
+
+    m_logfile << "\t\tTriangulation:"
+              << "\n\t\t\t Number of active cells: "
+              << m_triangulation.n_active_cells()
+              << "\n\t\t\t Number of used vertices: "
+              << m_triangulation.n_used_vertices()
+              << "\n\t\t\t Number of active edges: "
+              << m_triangulation.n_active_lines()
+              << "\n\t\t\t Number of active faces: "
+              << m_triangulation.n_active_faces()
+              << "\n\t\t\t Number of degrees of freedom (total): "
+	      << m_dof_handler_displacement.n_dofs()
+	       + m_dof_handler_phasefield.n_dofs()
+              << "\n\t\t\t Number of degrees of freedom (displacement): "
+	      << m_dof_handler_displacement.n_dofs()
+	      << "\n\t\t\t Number of degrees of freedom (phasefield): "
+	      << m_dof_handler_phasefield.n_dofs()
+              << std::endl;
+
+    setup_qph();
+
+    m_timer.leave_subsection();
+  }
+
+  template <int dim>
   void PhaseFieldSplitSolve<dim>::setup_system_phasefield()
   {
     m_dof_handler_phasefield.distribute_dofs(m_fe_phasefield);
@@ -2224,15 +2257,6 @@ namespace PhaseField
     m_sparsity_pattern_displacement.copy_from(dsp);
 
     m_system_matrix_displacement.reinit(m_sparsity_pattern_displacement);
-
-    m_logfile << "\t\tTriangulation (displacement):"
-              << "\n\t\t\t Number of active cells: "
-              << m_triangulation.n_active_cells()
-              << "\n\t\t\t Number of used vertices: "
-              << m_triangulation.n_used_vertices()
-              << "\n\t\t\t Number of degrees of freedom (displacement): "
-	      << m_dof_handler_displacement.n_dofs()
-              << std::endl;
   }
 
   template <int dim>
@@ -3184,7 +3208,7 @@ namespace PhaseField
 
         if (    newton_iteration > 0
 	     && m_error_residual_displacement.m_norm <= 1.0e-9
-             && m_error_update_displacement.m_norm <= 1.0e-9 )
+             && m_error_update_displacement.m_norm <= 1.0e-6 )
           {
 	    if (m_parameters.m_output_iteration_history)
 	      m_logfile << "  \t" << newton_iteration << "\t"
@@ -3557,18 +3581,17 @@ namespace PhaseField
     m_logfile << "Mesh refinement strategy = " << m_parameters.m_refinement_strategy << std::endl;
 
     if (m_parameters.m_refinement_strategy == "adaptive-refine")
-      AssertThrow(false,
-      		  ExcMessage("Adaptive mesh refinement strategy still"
-            	             " needs to be implemented!"));
+      {
+	m_logfile << "\tMaximum adaptive refinement times allowed in each step = "
+	          << m_parameters.m_max_adaptive_refine_times << std::endl;
+	m_logfile << "\tMaximum allowed cell refinement level = "
+		  << m_parameters.m_max_allowed_refinement_level << std::endl;
+	m_logfile << "\tPhasefield-based refinement threshold value = "
+		  << m_parameters.m_phasefield_refine_threshold << std::endl;
+      }
 
     m_logfile << "Global refinement times = " << m_parameters.m_global_refine_times << std::endl;
     m_logfile << "Local pre-refinement times = " <<m_parameters. m_local_prerefine_times << std::endl;
-    m_logfile << "Maximum adaptive refinement times allowed in each step = "
-	      << m_parameters.m_max_adaptive_refine_times << std::endl;
-    m_logfile << "Maximum allowed cell refinement level = "
-    	      << m_parameters.m_max_allowed_refinement_level << std::endl;
-    m_logfile << "Phasefield-based refinement threshold value = "
-	      << m_parameters.m_phasefield_refine_threshold << std::endl;
     m_logfile << "Allowed maximum h/l ratio = " << m_parameters.m_allowed_max_h_l_ratio << std::endl;
     m_logfile << "Total number of material types = " << m_parameters.m_total_material_regions << std::endl;
     m_logfile << "Material data file name = " << m_parameters.m_material_file_name << std::endl;
@@ -3577,16 +3600,6 @@ namespace PhaseField
     else
       m_logfile << "No need to calculate reaction forces." << std::endl;
 
-    if (m_parameters.m_relative_residual)
-      {
-        m_logfile << "Relative residual for convergence." << std::endl;
-        AssertThrow(false,
-                    ExcMessage("The option of using relative residual still"
-                               " needs to be implemented!"));
-      }
-    else
-      m_logfile << "Absolute residual for convergence." << std::endl;
-
     m_logfile << "Body force = (" << m_parameters.m_x_component << ", "
                                   << m_parameters.m_y_component << ", "
 	                          << m_parameters.m_z_component << ") (N/m^3)"
@@ -3594,6 +3607,194 @@ namespace PhaseField
 
     m_logfile << "End time = " << m_parameters.m_end_time << std::endl;
     m_logfile << "Time data file name = " << m_parameters.m_time_file_name << std::endl;
+  }
+
+  template <int dim>
+  bool PhaseFieldSplitSolve<dim>::local_refine_and_solution_transfer()
+  {
+    bool mesh_is_same = true;
+    bool cell_refine_flag = true;
+
+    unsigned int material_id;
+    double length_scale;
+    double cell_length;
+    while(cell_refine_flag)
+      {
+	cell_refine_flag = false;
+
+	std::vector<types::global_dof_index> local_dof_indices(m_fe_phasefield.dofs_per_cell);
+	for (const auto &cell : m_dof_handler_phasefield.active_cell_iterators())
+	  {
+	    cell->get_dof_indices(local_dof_indices);
+
+	    for (unsigned int i = 0; i< m_fe_phasefield.dofs_per_cell; ++i)
+	      {
+		if (  m_solution_phasefield(local_dof_indices[i])
+		    > m_parameters.m_phasefield_refine_threshold )
+		  {
+		    material_id = cell->material_id();
+		    length_scale = m_material_data[material_id][2];
+		    if (dim == 2)
+		      cell_length = std::sqrt(cell->measure());
+		    else
+		      cell_length = std::cbrt(cell->measure());
+		    if (  cell_length
+			> length_scale * m_parameters.m_allowed_max_h_l_ratio )
+		      {
+			if (cell->level() < m_parameters.m_max_allowed_refinement_level)
+			  {
+			    cell->set_refine_flag();
+			    break;
+			  }
+		      }
+		  }
+	      }
+	  }
+
+	for (const auto &cell : m_dof_handler_phasefield.active_cell_iterators())
+	  {
+	    if (cell->refine_flag_set())
+	      {
+		cell_refine_flag = true;
+		break;
+	      }
+	  }
+
+	// if any cell is refined, we need to project the solution
+	// to the newly refined mesh
+	if (cell_refine_flag)
+	  {
+	    mesh_is_same = false;
+
+	    std::vector<Vector<double> > old_solutions_d(2);
+	    old_solutions_d[0] = m_solution_phasefield;
+	    old_solutions_d[1] = m_solution_previous_timestep_phasefield;
+
+	    // history variable field L2 projection
+	    DoFHandler<dim> dof_handler_L2(m_triangulation);
+	    FE_DGQ<dim>     fe_L2(m_parameters.m_poly_degree); //Discontinuous Galerkin
+	    dof_handler_L2.distribute_dofs(fe_L2);
+	    AffineConstraints<double> constraints;
+	    constraints.clear();
+	    DoFTools::make_hanging_node_constraints(dof_handler_L2, constraints);
+	    constraints.close();
+
+	    Vector<double> old_history_variable_field_L2;
+	    old_history_variable_field_L2.reinit(dof_handler_L2.n_dofs());
+
+	    MappingQ<dim> mapping(m_parameters.m_poly_degree + 1);
+	    VectorTools::project(mapping,
+				 dof_handler_L2,
+				 constraints,
+				 m_qf_cell,
+				 [&] (const typename DoFHandler<dim>::active_cell_iterator & cell,
+				      const unsigned int q) -> double
+				 {
+				   return m_quadrature_point_history.get_data(cell)[q]->get_history_max_positive_strain_energy();
+				 },
+				 old_history_variable_field_L2);
+
+	    m_triangulation.prepare_coarsening_and_refinement();
+	    SolutionTransfer<dim, Vector<double>> solution_transfer_u(m_dof_handler_displacement);
+	    solution_transfer_u.prepare_for_coarsening_and_refinement(m_solution_previous_timestep_displacement);
+	    SolutionTransfer<dim, Vector<double>> solution_transfer_d(m_dof_handler_phasefield);
+	    solution_transfer_d.prepare_for_coarsening_and_refinement(old_solutions_d);
+	    SolutionTransfer<dim, Vector<double>> solution_transfer_history_variable(dof_handler_L2);
+	    solution_transfer_history_variable.prepare_for_coarsening_and_refinement(old_history_variable_field_L2);
+	    m_triangulation.execute_coarsening_and_refinement();
+
+	    setup_system();
+
+	    dof_handler_L2.distribute_dofs(fe_L2);
+	    constraints.clear();
+	    DoFTools::make_hanging_node_constraints(dof_handler_L2, constraints);
+	    constraints.close();
+
+	    Vector<double> tmp_solution_previous_u;
+	    tmp_solution_previous_u.reinit(m_dof_handler_displacement.n_dofs());
+	    std::vector<Vector<double>> tmp_solutions_d(2);
+	    tmp_solutions_d[0].reinit(m_dof_handler_phasefield.n_dofs());
+	    tmp_solutions_d[1].reinit(m_dof_handler_phasefield.n_dofs());
+
+	    Vector<double> new_history_variable_field_L2;
+	    new_history_variable_field_L2.reinit(dof_handler_L2.n_dofs());
+
+#  if DEAL_II_VERSION_GTE(9, 7, 0)
+	    solution_transfer_u.interpolate(tmp_solution_previous_u);
+#  else
+	    // If an older version of dealII is used, for example, 9.4.0, interpolate()
+            // needs to use the following interface.
+	    solution_transfer_u.interpolate(m_solution_previous_timestep_displacement, tmp_solution_previous_u);
+#  endif
+
+#  if DEAL_II_VERSION_GTE(9, 7, 0)
+	    solution_transfer_d.interpolate(tmp_solutions_d);
+#  else
+	    // If an older version of dealII is used, for example, 9.4.0, interpolate()
+            // needs to use the following interface.
+	    solution_transfer_d.interpolate(old_solutions_d, tmp_solutions_d);
+#  endif
+
+#  if DEAL_II_VERSION_GTE(9, 7, 0)
+            solution_transfer_history_variable.interpolate(new_history_variable_field_L2);
+#  else
+	    // If an older version of dealII is used, for example, 9.4.0, interpolate()
+            // needs to use the following interface.
+            solution_transfer_history_variable.interpolate(old_history_variable_field_L2, new_history_variable_field_L2);
+#  endif
+
+	    m_solution_previous_timestep_displacement = tmp_solution_previous_u;
+
+	    m_solution_previous_timestep_phasefield = tmp_solutions_d[1];
+	    m_solution_phasefield = tmp_solutions_d[0];
+
+	    // make sure the projected solutions still satisfy
+	    // hanging node constraints
+	    m_constraints_displacement.distribute(m_solution_previous_timestep_displacement);
+	    m_constraints_phasefield.distribute(m_solution_previous_timestep_phasefield);
+	    m_constraints_phasefield.distribute(m_solution_phasefield);
+	    constraints.distribute(new_history_variable_field_L2);
+
+	    // new_history_variable_field_L2 contains the history variable projected
+	    // onto the newly refined mesh
+	    FEValues<dim> fe_values(fe_L2,
+				    m_qf_cell,
+				    update_values | update_gradients |
+				    update_quadrature_points | update_JxW_values);
+
+	    for (const auto &cell : dof_handler_L2.active_cell_iterators())
+	      {
+		fe_values.reinit(cell);
+
+		const std::vector<std::shared_ptr<PointHistory<dim>>> lqph =
+		      m_quadrature_point_history.get_data(cell);
+
+		std::vector<double> history_variable_values_cell(m_n_q_points);
+
+		fe_values.get_function_values(
+		    new_history_variable_field_L2, history_variable_values_cell);
+
+		for (unsigned int q_point : fe_values.quadrature_point_indices())
+		  {
+		    lqph[q_point]->assign_history_variable(history_variable_values_cell[q_point]);
+		  }
+	      }
+	  } // if (cell_refine_flag)
+      } // while(cell_refine_flag)
+
+    // calculate field variables for newly refined cells
+    if (!mesh_is_same)
+      {
+	m_solution_displacement = m_solution_previous_timestep_displacement;
+	m_solution_phasefield = m_solution_previous_timestep_phasefield;
+
+	Vector<double> solution_delta_u(m_dof_handler_displacement.n_dofs());
+	solution_delta_u = 0.0;
+	update_qph_incremental(solution_delta_u);
+	update_history_field_step();
+      }
+
+    return mesh_is_same;
   }
 
   template <int dim>
@@ -3609,9 +3810,7 @@ namespace PhaseField
     read_time_data(m_parameters.m_time_file_name, time_table);
 
     make_grid();
-    setup_system_phasefield();
-    setup_system_displacement();
-    setup_qph();
+    setup_system();
     output_results();
 
     while(m_time.current() < m_time.end() - m_time.get_delta_t()*1.0e-6)
@@ -3622,127 +3821,105 @@ namespace PhaseField
 		  << "Timestep " << m_time.get_timestep() << " @ " << m_time.current()
 		  << 's' << std::endl;
 
-	// phase-field solution from the previous time step
-	m_solution_previous_timestep_phasefield = m_solution_phasefield;
+        bool mesh_is_same = false;
 
-	Vector<double> solution_phasefield_prev_iter(m_dof_handler_phasefield.n_dofs());
-	Vector<double> solution_phasefield_diff(m_dof_handler_phasefield.n_dofs());
-	Vector<double> solution_displacement_prev_iter(m_dof_handler_displacement.n_dofs());
-	Vector<double> solution_displacement_diff(m_dof_handler_displacement.n_dofs());
+	// solution from the previous time step
+        m_solution_previous_timestep_displacement = m_solution_displacement;
+	m_solution_previous_timestep_phasefield = m_solution_phasefield;
 
 	double energy_functional_0 = 0.0;
 	double energy_functional_previous = 0.0;
 	double energy_functional_current = 0.0;
 	double angle_beta = 90.0;
 
-	unsigned int iter_am = 1;
+        // local adaptive mesh refinement loop
+	unsigned int adp_refine_iteration = 0;
+        for (; adp_refine_iteration < m_parameters.m_max_adaptive_refine_times + 1; ++adp_refine_iteration)
+          {
+            if (m_parameters.m_refinement_strategy == "adaptive-refine")
+              m_logfile << "\tAdaptive refinement-"
+            	        << adp_refine_iteration << ": " << std::endl;
 
-	if (m_parameters.m_output_iteration_history)
-	  print_conv_header();
-
-	unsigned int linear_solve_needed = 0;
-
-	for (; iter_am <= m_parameters.m_max_am_iteration; iter_am++)
-	  {
-	    if (m_parameters.m_output_iteration_history)
-	      m_logfile << '\t' << std::setw(4) << iter_am
-			<< std::flush;
-
-            // alternate minimization:
-	    // first, solve the displacement subproblem
-	    // then, solve the phase-field subproblem
-	    if (m_parameters.m_output_iteration_history)
-	      m_logfile << "  \tDISP-sub" << std::flush;
-	    linear_solve_needed += displacement_step(iter_am);
+            Vector<double> solution_phasefield_prev_iter(m_dof_handler_phasefield.n_dofs());
+	    Vector<double> solution_phasefield_diff(m_dof_handler_phasefield.n_dofs());
+	    Vector<double> solution_displacement_prev_iter(m_dof_handler_displacement.n_dofs());
+	    Vector<double> solution_displacement_diff(m_dof_handler_displacement.n_dofs());
 
 	    if (m_parameters.m_output_iteration_history)
-  	      m_logfile << "  PF-sub (linear)" << std::flush;
-	    phasefield_step();
-	    linear_solve_needed += 1;
+	      print_conv_header();
 
-	    // calculate the displacement residual
-	    assemble_rhs_displacement();
+	    unsigned int linear_solve_needed = 0;
 
-	    // calculate the phase-field residual
-	    assemble_rhs_phasefield();
+	    unsigned int iter_am = 1;
 
-            // calculate the phasefield increment
-	    solution_phasefield_diff = m_solution_phasefield - solution_phasefield_prev_iter;
-
-            // calculate the displacement increment
-            solution_displacement_diff = m_solution_displacement - solution_displacement_prev_iter;
-
-	    for (unsigned int i = 0; i < m_dof_handler_phasefield.n_dofs(); ++i)
-	      {
-		if (m_constraints_phasefield.is_constrained(i))
-		  {
-		    solution_phasefield_diff(i) = 0.0;
-		    m_system_rhs_phasefield(i) = 0.0;
-		  }
-	      }
-            double phasefield_inc_l2 = solution_phasefield_diff.l2_norm();
-            double phasefield_residual_l2 = m_system_rhs_phasefield.l2_norm();
-
-            for (unsigned int i = 0; i < m_dof_handler_displacement.n_dofs(); ++i)
-              {
-		if (m_constraints_displacement.is_constrained(i))
-		  {
-		    solution_displacement_diff(i) = 0.0;
-		    m_system_rhs_displacement(i) = 0.0;
-		  }
-              }
-            double displacement_inc_l2 = solution_displacement_diff.l2_norm();
-            double displacement_residual_l2 = m_system_rhs_displacement.l2_norm();
-
-	    energy_functional_previous = energy_functional_current;
-	    energy_functional_current = calculate_energy_functional();
-
-            if (m_parameters.m_output_iteration_history)
-              {
-        	m_logfile << "  "
-        	          << displacement_residual_l2 << "  "
-        	          << phasefield_residual_l2 << "  "
-			  << displacement_inc_l2 << "  "
-			  << phasefield_inc_l2 << "  "
-			  << std::fixed << std::setprecision(10) << std::scientific
-			  << energy_functional_current
-			  << std::endl;
-              }
-
-	    if (m_parameters.m_am_convergence_criterion == "SinglePass")
+	    for (; iter_am <= m_parameters.m_max_am_iteration; iter_am++)
 	      {
 		if (m_parameters.m_output_iteration_history)
-		  {
-		    m_logfile << '\t';
-		    for (unsigned int i = 0; i < 133; ++i)
-		      m_logfile << '_';
-		    m_logfile << std::endl;
-		  }
-		m_logfile << "\tSingle pass for alternate minimization." << std::endl;
-		break;
-	      }
-	    else if (m_parameters.m_am_convergence_criterion == "Energy")
-	      {
-		if (iter_am == 1)
-		  energy_functional_0 = energy_functional_current;
+		  m_logfile << '\t' << std::setw(4) << iter_am
+			    << std::flush;
 
-		if (iter_am > 1)
-		  angle_beta = std::atan( (energy_functional_previous - energy_functional_current) /
-		                          (energy_functional_0 - energy_functional_current) * (iter_am-1) )
-                                       * 45.0 / std::atan(1.0);
+		// alternate minimization:
+		// first, solve the displacement subproblem
+		// then, solve the phase-field subproblem
+		if (m_parameters.m_output_iteration_history)
+		  m_logfile << "  \tDISP-sub" << std::flush;
+		linear_solve_needed += displacement_step(iter_am);
 
+		if (m_parameters.m_output_iteration_history)
+		  m_logfile << "  PF-sub (linear)" << std::flush;
+		phasefield_step();
+		linear_solve_needed += 1;
+
+		// calculate the displacement residual
+		assemble_rhs_displacement();
+
+		// calculate the phase-field residual
+		assemble_rhs_phasefield();
+
+		// calculate the phasefield increment
 		solution_phasefield_diff = m_solution_phasefield - solution_phasefield_prev_iter;
+
+		// calculate the displacement increment
+		solution_displacement_diff = m_solution_displacement - solution_displacement_prev_iter;
+
+		for (unsigned int i = 0; i < m_dof_handler_phasefield.n_dofs(); ++i)
+		  {
+		    if (m_constraints_phasefield.is_constrained(i))
+		      {
+			solution_phasefield_diff(i) = 0.0;
+			m_system_rhs_phasefield(i) = 0.0;
+		      }
+		  }
 		double phasefield_inc_l2 = solution_phasefield_diff.l2_norm();
+		double phasefield_residual_l2 = m_system_rhs_phasefield.l2_norm();
+
+		for (unsigned int i = 0; i < m_dof_handler_displacement.n_dofs(); ++i)
+		  {
+		    if (m_constraints_displacement.is_constrained(i))
+		      {
+			solution_displacement_diff(i) = 0.0;
+			m_system_rhs_displacement(i) = 0.0;
+		      }
+		  }
+		double displacement_inc_l2 = solution_displacement_diff.l2_norm();
+		double displacement_residual_l2 = m_system_rhs_displacement.l2_norm();
+
+		energy_functional_previous = energy_functional_current;
+		energy_functional_current = calculate_energy_functional();
+
 		if (m_parameters.m_output_iteration_history)
 		  {
-		    m_logfile << std::endl;
-		    m_logfile << "\t\t|| d^{k+1} - d^{k} ||_2 =  " << phasefield_inc_l2 << std::endl;
-		    m_logfile << "\t\tEnergy functional (J) = " << energy_functional_current << std::endl;
-		    m_logfile << "\t\tEnergy functional tangent angle (degree) = " << angle_beta << "\n" << std::endl;
+		    m_logfile << "  "
+			      << displacement_residual_l2 << "  "
+			      << phasefield_residual_l2 << "  "
+			      << displacement_inc_l2 << "  "
+			      << phasefield_inc_l2 << "  "
+			      << std::fixed << std::setprecision(10) << std::scientific
+			      << energy_functional_current
+			      << std::endl;
 		  }
 
-		// phasefield_l2 < m_parameters.m_phasefield_l2_tol
-		if ( (iter_am > 1) && (angle_beta < 1.0) && (angle_beta > 0.0) )
+		if (m_parameters.m_am_convergence_criterion == "SinglePass")
 		  {
 		    if (m_parameters.m_output_iteration_history)
 		      {
@@ -3751,86 +3928,140 @@ namespace PhaseField
 			  m_logfile << '_';
 			m_logfile << std::endl;
 		      }
-		    m_logfile << "\tAlternate minimization converges after "
-			      << iter_am << " iterations based on the "
-			      << m_parameters.m_am_convergence_criterion
-			      << " convergence criterion."
-			      << std::endl;
-
-		    m_logfile << "\tTotally " << linear_solve_needed
-			      << " linear solves are required."
-			      << std::endl;
+		    m_logfile << "\tSingle pass for alternate minimization." << std::endl;
 		    break;
 		  }
-		else
+		else if (m_parameters.m_am_convergence_criterion == "Energy")
 		  {
-		    solution_phasefield_prev_iter = m_solution_phasefield;
-		    solution_displacement_prev_iter = m_solution_displacement;
-		  }
-	      }
-	    else if (m_parameters.m_am_convergence_criterion == "Residual")
-	      {
-		if (   (iter_am > 1)
-		    && (displacement_residual_l2 < m_parameters.m_tol_u_residual)
-		    && (phasefield_residual_l2 < m_parameters.m_tol_d_residual)
-		    && (displacement_inc_l2 < m_parameters.m_tol_u_incr)
-		    && (phasefield_inc_l2 < m_parameters.m_tol_d_incr)   )
-		  {
+		    if (iter_am == 1)
+		      energy_functional_0 = energy_functional_current;
+
+		    if (iter_am > 1)
+		      angle_beta = std::atan( (energy_functional_previous - energy_functional_current) /
+					      (energy_functional_0 - energy_functional_current) * (iter_am-1) )
+					   * 45.0 / std::atan(1.0);
+
+		    solution_phasefield_diff = m_solution_phasefield - solution_phasefield_prev_iter;
+		    double phasefield_inc_l2 = solution_phasefield_diff.l2_norm();
 		    if (m_parameters.m_output_iteration_history)
 		      {
-		        m_logfile << '\t';
-			for (unsigned int i = 0; i < 133; ++i)
-			  m_logfile << '_';
 			m_logfile << std::endl;
+			m_logfile << "\t\t|| d^{k+1} - d^{k} ||_2 =  " << phasefield_inc_l2 << std::endl;
+			m_logfile << "\t\tEnergy functional (J) = " << energy_functional_current << std::endl;
+			m_logfile << "\t\tEnergy functional tangent angle (degree) = " << angle_beta << "\n" << std::endl;
 		      }
 
-		    m_logfile << "\tAlternate minimization converges after "
-			      << iter_am << " iterations based on the "
-			      << m_parameters.m_am_convergence_criterion
-			      << " convergence criterion."
-			      << std::endl;
+		    if ( (iter_am > 1) && (angle_beta < 1.0) && (angle_beta > 0.0) )
+		      {
+			if (m_parameters.m_output_iteration_history)
+			  {
+			    m_logfile << '\t';
+			    for (unsigned int i = 0; i < 133; ++i)
+			      m_logfile << '_';
+			    m_logfile << std::endl;
+			  }
+			m_logfile << "\tAlternate minimization converges after "
+				  << iter_am << " iterations based on the "
+				  << m_parameters.m_am_convergence_criterion
+				  << " convergence criterion."
+				  << std::endl;
 
-		    m_logfile << "\tTotally " << linear_solve_needed
-			      << " linear solves are required."
-			      << std::endl;
+			m_logfile << "\tTotally " << linear_solve_needed
+				  << " linear solves are required."
+				  << std::endl;
+			break;
+		      }
+		    else
+		      {
+			solution_phasefield_prev_iter = m_solution_phasefield;
+			solution_displacement_prev_iter = m_solution_displacement;
+		      }
+		  }
+		else if (m_parameters.m_am_convergence_criterion == "Residual")
+		  {
+		    if (   (iter_am > 1)
+			&& (displacement_residual_l2 < m_parameters.m_tol_u_residual)
+			&& (phasefield_residual_l2 < m_parameters.m_tol_d_residual)
+			&& (displacement_inc_l2 < m_parameters.m_tol_u_incr)
+			&& (phasefield_inc_l2 < m_parameters.m_tol_d_incr)   )
+		      {
+			if (m_parameters.m_output_iteration_history)
+			  {
+			    m_logfile << '\t';
+			    for (unsigned int i = 0; i < 133; ++i)
+			      m_logfile << '_';
+			    m_logfile << std::endl;
+			  }
 
-		    m_logfile << "\t\tAbsolute residual of disp. equation: "
-		    	      << displacement_residual_l2 << std::endl;
+			m_logfile << "\tAlternate minimization converges after "
+				  << iter_am << " iterations based on the "
+				  << m_parameters.m_am_convergence_criterion
+				  << " convergence criterion."
+				  << std::endl;
 
-		    m_logfile << "\t\tAbsolute residual of phasefield equation: "
-			      << phasefield_residual_l2 << std::endl;
+			m_logfile << "\tTotally " << linear_solve_needed
+				  << " linear solves are required."
+				  << std::endl;
 
-		    m_logfile << "\t\tAbsolute increment of disp.: "
-			      << displacement_inc_l2 << std::endl;
+			m_logfile << "\t\tAbsolute residual of disp. equation: "
+				  << displacement_residual_l2 << std::endl;
 
-		    m_logfile << "\t\tAbsolute increment of phasefield: "
-			      << phasefield_inc_l2 << std::endl;
+			m_logfile << "\t\tAbsolute residual of phasefield equation: "
+				  << phasefield_residual_l2 << std::endl;
 
-		    break;
+			m_logfile << "\t\tAbsolute increment of disp.: "
+				  << displacement_inc_l2 << std::endl;
+
+			m_logfile << "\t\tAbsolute increment of phasefield: "
+				  << phasefield_inc_l2 << std::endl;
+
+			break;
+		      }
+		    else
+		      {
+			solution_phasefield_prev_iter = m_solution_phasefield;
+			solution_displacement_prev_iter = m_solution_displacement;
+		      }
 		  }
 		else
 		  {
-		    solution_phasefield_prev_iter = m_solution_phasefield;
-		    solution_displacement_prev_iter = m_solution_displacement;
+		    AssertThrow(false,
+				ExcMessage("Selected alternate minimization convergence"
+					   " strategy not implemented!"));
 		  }
+	      } // 	for (; iter_am <= m_parameters.m_max_am_iteration; iter_am++)
+
+	    if (iter_am == m_parameters.m_max_am_iteration)
+	      {
+		m_logfile << "After " << m_parameters.m_max_am_iteration << " iterations, "
+			  << "no convergence is achieved in alternate minimization "
+			  << "based on the " << m_parameters.m_am_convergence_criterion
+			  << "convergence criterion" << std::endl;
+		AssertThrow(false,
+			    ExcMessage("No convergence achieved in alternate minimization!"));
+	      }
+
+	    if (m_parameters.m_refinement_strategy == "adaptive-refine")
+	      {
+
+		if (adp_refine_iteration == m_parameters.m_max_adaptive_refine_times)
+		  break;
+
+		mesh_is_same = local_refine_and_solution_transfer();
+
+		if (mesh_is_same)
+		  break;
+	      }
+	    else if (m_parameters.m_refinement_strategy == "pre-refine")
+	      {
+	        break;
 	      }
 	    else
 	      {
 		AssertThrow(false,
-		            ExcMessage("Selected alternate minimization convergence"
-		        	       " strategy not implemented!"));
+		            ExcMessage("Selected mesh refinement strategy not implemented!"));
 	      }
-	  } // 	for (; iter_am <= m_parameters.m_max_am_iteration; iter_am++)
-
-	if (iter_am == m_parameters.m_max_am_iteration)
-	  {
-	    m_logfile << "After " << m_parameters.m_max_am_iteration << " iterations, "
-		      << "no convergence is achieved in alternate minimization "
-		      << "based on the " << m_parameters.m_am_convergence_criterion
-		      << "convergence criterion" << std::endl;
-	    AssertThrow(false,
-	                ExcMessage("No convergence achieved in alternate minimization!"));
-	  }
+          } // ++adp_refine_iteration
 
 	m_logfile << "\t\tUpdate history variable" << std::endl;
 	update_history_field_step();
