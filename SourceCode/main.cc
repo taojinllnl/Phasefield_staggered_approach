@@ -30,6 +30,7 @@
 //    and the phasefield. The solution converges until both residuals are smaller than
 //    the prescribed tolerance.
 // 5. Add the adaptively mesh refinement option (Feb. 14th, 2026)
+// 6. Add the plane-stress option and flag (Feb. 15th, 2026)
 
 #include <deal.II/grid/tria.h>
 #include <deal.II/grid/grid_generator.h>
@@ -153,6 +154,7 @@ namespace PhaseField
       std::string m_logfile_name;
       bool m_output_iteration_history;
       std::string m_am_convergence_criterion;
+      bool m_plane_stress;
       std::string m_type_linear_solver;
       std::string m_refinement_strategy;
       unsigned int m_global_refine_times;
@@ -192,6 +194,11 @@ namespace PhaseField
                           "Residual",
                           Patterns::Selection("Residual|Energy|SinglePass"),
                           "Type of convergence strategy for alternate minimization");
+
+        prm.declare_entry("Plane stress",
+			  "no",
+			  Patterns::Selection("yes|no"),
+			  "If it is 2D, is it plane-stress?");
 
         prm.declare_entry("Linear solver type",
                           "Direct",
@@ -261,6 +268,7 @@ namespace PhaseField
         m_logfile_name = prm.get("Log file name");
         m_output_iteration_history = prm.get_bool("Output iteration history");
         m_am_convergence_criterion = prm.get("AM convergence strategy");
+        m_plane_stress = prm.get_bool("Plane stress");
         m_type_linear_solver = prm.get("Linear solver type");
         m_refinement_strategy = prm.get("Mesh refinement strategy");
         m_global_refine_times = prm.get_integer("Global refinement times");
@@ -578,13 +586,15 @@ namespace PhaseField
 				           const double residual_k,
 					   const double length_scale,
 					   const double viscosity,
-					   const double gc)
+					   const double gc,
+					   const bool   plane_stress_flag)
       : m_lame_lambda(lame_lambda)
       , m_lame_mu(lame_mu)
       , m_residual_k(residual_k)
       , m_length_scale(length_scale)
       , m_eta(viscosity)
       , m_gc(gc)
+      , m_plane_stress(plane_stress_flag)
       , m_phase_field_value(0.0)
       , m_grad_phasefield(Tensor<1, dim>())
       , m_strain(SymmetricTensor<2, dim>())
@@ -668,29 +678,38 @@ namespace PhaseField
       SymmetricTensor<2, dim> stress_positive, stress_negative;
       const double degradation = degradation_function(m_phase_field_value) + m_residual_k;
       const double I_1 = trace(m_strain);
-      stress_positive = m_lame_lambda * usr_spectrum_decomposition::positive_ramp_function(I_1)
+
+      // 2D plane strain and 3D cases
+      double my_lambda = m_lame_lambda;
+
+      // 2D plane stress case
+      if (    dim == 2
+           && m_plane_stress)
+	my_lambda = 2 * m_lame_mu * m_lame_lambda / (m_lame_lambda + 2 * m_lame_mu);
+
+      stress_positive = my_lambda * usr_spectrum_decomposition::positive_ramp_function(I_1)
                                       * Physics::Elasticity::StandardTensors<dim>::I
                       + 2 * m_lame_mu * strain_positive;
-      stress_negative = m_lame_lambda * usr_spectrum_decomposition::negative_ramp_function(I_1)
+      stress_negative = my_lambda * usr_spectrum_decomposition::negative_ramp_function(I_1)
                                       * Physics::Elasticity::StandardTensors<dim>::I
       		      + 2 * m_lame_mu * strain_negative;
 
       m_stress = degradation * stress_positive + stress_negative;
 
       SymmetricTensor<4, dim> C_positive, C_negative;
-      C_positive = m_lame_lambda * usr_spectrum_decomposition::heaviside_function(I_1)
+      C_positive = my_lambda * usr_spectrum_decomposition::heaviside_function(I_1)
                                  * Physics::Elasticity::StandardTensors<dim>::IxI
 		 + 2 * m_lame_mu * projector_positive;
-      C_negative = m_lame_lambda * usr_spectrum_decomposition::heaviside_function(-I_1)
+      C_negative = my_lambda * usr_spectrum_decomposition::heaviside_function(-I_1)
                                  * Physics::Elasticity::StandardTensors<dim>::IxI
       		 + 2 * m_lame_mu * projector_negative;
       m_mechanical_C = degradation * C_positive + C_negative;
 
-      m_strain_energy_positive = 0.5 * m_lame_lambda * usr_spectrum_decomposition::positive_ramp_function(I_1)
+      m_strain_energy_positive = 0.5 * my_lambda * usr_spectrum_decomposition::positive_ramp_function(I_1)
                                                      * usr_spectrum_decomposition::positive_ramp_function(I_1)
                                + m_lame_mu * strain_positive * strain_positive;
 
-      m_strain_energy_negative = 0.5 * m_lame_lambda * usr_spectrum_decomposition::negative_ramp_function(I_1)
+      m_strain_energy_negative = 0.5 * my_lambda * usr_spectrum_decomposition::negative_ramp_function(I_1)
                                                      * usr_spectrum_decomposition::negative_ramp_function(I_1)
                                + m_lame_mu * strain_negative * strain_negative;
 
@@ -711,6 +730,7 @@ namespace PhaseField
     const double m_length_scale;
     const double m_eta;
     const double m_gc;
+    const bool m_plane_stress;
     double m_phase_field_value;
     Tensor<1, dim> m_grad_phasefield;
     SymmetricTensor<2, dim> m_strain;
@@ -741,7 +761,8 @@ namespace PhaseField
 		   const double length_scale,
 		   const double gc,
 		   const double viscosity,
-		   const double residual_k)
+		   const double residual_k,
+		   const bool   plane_stress_flag)
     {
       m_material =
               std::make_shared<LinearIsotropicElasticityAdditiveSplit<dim>>(lame_lambda,
@@ -749,7 +770,8 @@ namespace PhaseField
 								            residual_k,
 									    length_scale,
 									    viscosity,
-									    gc);
+									    gc,
+									    plane_stress_flag);
       m_history_max_positive_strain_energy = 0.0;
       m_length_scale = length_scale;
       m_gc = gc;
@@ -1202,7 +1224,8 @@ namespace PhaseField
 
         for (unsigned int q_point = 0; q_point < m_n_q_points; ++q_point)
           lqph[q_point]->setup_lqp(lame_lambda, lame_mu, length_scale,
-				   gc, viscosity, residual_k);
+				   gc, viscosity, residual_k,
+				   m_parameters.m_plane_stress);
       }
   }
 
@@ -3577,6 +3600,13 @@ namespace PhaseField
 	      << m_parameters.m_output_iteration_history << std::endl;
     m_logfile << "Alternate minimization convergence criterion = "
 	      << m_parameters.m_am_convergence_criterion << std::endl;
+    if (dim == 2)
+      {
+	if (m_parameters.m_plane_stress)
+	  m_logfile << "2D plane-stress case" << std::endl;
+	else
+	  m_logfile << "2D plane-strain case" << std::endl;
+      }
     m_logfile << "Linear solver type = " << m_parameters.m_type_linear_solver << std::endl;
     m_logfile << "Mesh refinement strategy = " << m_parameters.m_refinement_strategy << std::endl;
 
