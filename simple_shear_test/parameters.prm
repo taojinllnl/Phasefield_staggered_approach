@@ -18,7 +18,7 @@ subsection Scenario
   set AM convergence strategy = Residual
   
   # Linear solver type (Direct or CG)
-  set Linear solver type = Direct
+  set Linear solver type = CG
   
   # Mesh refinement strategy (pre-refine or adaptive-refine)
   set Mesh refinement strategy = pre-refine
@@ -79,17 +79,9 @@ end
 subsection Nonlinear solver
   # Maximum allowed number of alternate minimization iteration
   set Max AM iteration = 10000
-  
-  # L2 norm tolerance of phasefield for alternate minimization
-  set Phasefield L2 tolerance = 1.0e-3
 
   # Number of Newton-Raphson iterations allowed
   set Max iterations Newton-Raphson = 30
-  
-  # Relative residual (yes|no)
-  # yes - relative residual
-  # no  - absolute residual
-  set Relative residual = no
 
   # Displacement residual tolerance
   set Tolerance displacement residual       = 1.0e-6
