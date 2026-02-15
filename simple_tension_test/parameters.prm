@@ -17,6 +17,9 @@ subsection Scenario
   # Type of convergence strategy for alternate minimization (Residual or Energy or SinglePass)
   set AM convergence strategy = Residual
   
+  # If it is 2D case, is it plane-stress? (yes or no)
+  set Plane stress = yes
+  
   # Linear solver type (Direct or CG)
   set Linear solver type = CG
   
