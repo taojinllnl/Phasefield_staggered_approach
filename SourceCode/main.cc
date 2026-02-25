@@ -31,6 +31,10 @@
 //    the prescribed tolerance.
 // 5. Add the adaptively mesh refinement option (Feb. 14th, 2026)
 // 6. Add the plane-stress option and flag (Feb. 15th, 2026)
+// 7. Add the phase-field AT-1, AT-2 model and phase-field cohesive zone model (PF-CZM) (Feb. 17th, 2026)
+//    In order to accomodate nonlinear degradation functions for PF-CZM, the phase-field subproblem
+//    is programmed as a nonlinear problem solved by the Newton-Raphson iterations. For AT-2 model,
+//    the nonlinear solver should converge in one step for the phase-field subproblem.
 
 #include <deal.II/grid/tria.h>
 #include <deal.II/grid/grid_generator.h>
@@ -124,26 +128,158 @@ namespace PhaseField
       }
   }
 
-  double degradation_function(const double d)
+  // various phase-field models (AT1, AT2, PFCZM)
+  double degradation_function(const double d,
+			      const double p,
+			      const double a1,
+			      const double a2,
+			      const double a3,
+			      const std::string & model_name)
   {
-    return (1.0 - d) * (1.0 - d);
+    double value = 0.0;
+
+    if (   model_name == "AT2"
+	|| model_name == "AT1")
+      value = (1.0 - d) * (1.0 - d);
+    else if (model_name == "PFCZM")
+      {
+	const double f1 = std::pow(std::abs(1-d), p);
+	const double f2 = f1 + a1*d + a1*a2*d*d + a1*a3*d*d*d;
+	value = f1/f2;
+      }
+    else
+      Assert(false,
+      	     ExcMessage("The phase-field degradation function has not been implemented!"));
+
+    return value;
   }
 
-  // In the staggered approach, the phase-field subproblem is a linear problem.
-  // Therefore, the following function is not used. If we choose a different
-  // phase-field degradation function, we have to modify the linear system of
-  // the phase-field subproblem manually.
-  double degradation_function_derivative(const double d)
+  double degradation_function_derivative(const double d,
+  					 const double p,
+  					 const double a1,
+  					 const double a2,
+  					 const double a3,
+  				         const std::string & model_name)
   {
-    return 2.0 * (d - 1.0);
+    double value = 0.0;
+
+    if (   model_name == "AT2"
+        || model_name == "AT1")
+      value = 2.0 * (d - 1.0);
+    else if (model_name == "PFCZM")
+      {
+        const double f1 = std::pow(std::abs(1-d), p);
+	const double f2 = f1 + a1*d + a1*a2*d*d + a1*a3*d*d*d;
+	const double f1_1 = (-p) * std::pow(std::abs(1-d), p-1);
+	const double f2_1 = f1_1 + a1 + 2*a1*a2*d + 3*a1*a3*d*d;
+        value = (f1_1 * f2 - f1 * f2_1) / (f2 * f2);
+      }
+    else
+      Assert(false,
+	     ExcMessage("The phase-field degradation function has not been implemented!"));
+
+    return value;
   }
 
-  // In the staggered approach, since the phase-field subproblem is linear, the
-  // 2nd-order derivative of the degradation function is never used.
-  double degradation_function_2nd_order_derivative(const double d)
+  double degradation_function_2nd_order_derivative(const double d,
+  						   const double p,
+  						   const double a1,
+  						   const double a2,
+  						   const double a3,
+  					           const std::string & model_name)
+  {
+    double value = 0.0;
+
+    if (   model_name == "AT2"
+        || model_name == "AT1")
+      value = 2.0;
+    else if (model_name == "PFCZM")
+      {
+	const double f1 = std::pow(std::abs(1-d), p);
+	const double f2 = f1 + a1*d + a1*a2*d*d + a1*a3*d*d*d;
+	const double f1_1 = (-p) * std::pow(std::abs(1-d), p-1);
+	const double f2_1 = f1_1 + a1 + 2*a1*a2*d + 3*a1*a3*d*d;
+	const double f1_2 = p * (p-1) * std::pow(std::abs(1-d), p-2);
+	const double f2_2 = f1_2 + 2*a1*a2 + 6*a1*a3*d;
+	const double f3 = f1_1 * f2 - f1 * f2_1;
+	const double f4 = f2 * f2;
+	const double f3_1 = f1_2 * f2 - f1 * f2_2;
+	const double f4_1 = 2 * f2 * f2_1;
+	value = (f3_1 * f4 - f3 * f4_1) / (f4 * f4);
+      }
+    else
+      Assert(false,
+	     ExcMessage("The phase-field degradation function has not been implemented!"));
+
+    return value;
+  }
+
+  inline double phasefield_geometry_function(const double d,
+					     const std::string & model_name)
+  {
+    double value = 0.0;
+    if (model_name == "AT2")
+      value = d * d;
+    else if (model_name == "AT1")
+      value = d;
+    else if (model_name == "PFCZM")
+      value = 2.0 * d - d * d;
+    else
+      Assert(false,
+	     ExcMessage("The phase-field geometric function has not been implemented!"));
+
+    return value;
+  }
+
+  inline double phasefield_geometry_function_derivative(const double d,
+  							const std::string & model_name)
+  {
+    double value = 0.0;
+    if (model_name == "AT2")
+      value = 2.0 * d;
+    else if (model_name == "AT1")
+      value = 1.0;
+    else if (model_name == "PFCZM")
+      value = 2.0 * (1-d);
+    else
+      Assert(false,
+	     ExcMessage("The phase-field geometric function has not been implemented!"));
+
+    return value;
+  }
+
+  inline double phasefield_geometry_function_2nd_order_derivative(const double d,
+				  				  const std::string & model_name)
   {
     (void) d;
-    return 2.0;
+    double value = 0.0;
+    if (model_name == "AT2")
+      value = 2.0;
+    else if (model_name == "AT1")
+      value = 0.0;
+    else if (model_name == "PFCZM")
+      value = -2.0;
+    else
+      Assert(false,
+	   ExcMessage("The phase-field geometric function has not been implemented!"));
+
+    return value;
+  }
+
+  inline double phasefield_coefficient_constant(const std::string & model_name)
+  {
+    double value = 0.0;
+    if (model_name == "AT2")
+      value = 2.0;
+    else if (model_name == "AT1")
+      value = 8.0/3;
+    else if (model_name == "PFCZM")
+      value = 4 * std::atan(1);
+    else
+      Assert(false,
+	     ExcMessage("The phase-field geometric function has not been implemented!"));
+
+    return value;
   }
 
   namespace Parameters
@@ -153,6 +289,7 @@ namespace PhaseField
       unsigned int m_scenario;
       std::string m_logfile_name;
       bool m_output_iteration_history;
+      std::string m_phasefield_name;
       std::string m_am_convergence_criterion;
       bool m_plane_stress;
       std::string m_type_linear_solver;
@@ -189,6 +326,11 @@ namespace PhaseField
 			  "yes",
                           Patterns::Selection("yes|no"),
 			  "Shall we write iteration history to the log file?");
+
+        prm.declare_entry("Phase-field model type",
+                          "AT2",
+                          Patterns::Selection("AT1|AT2|PFCZM"),
+                          "Type of phase-field model");
 
         prm.declare_entry("AM convergence strategy",
                           "Residual",
@@ -267,6 +409,7 @@ namespace PhaseField
         m_scenario = prm.get_integer("Scenario number");
         m_logfile_name = prm.get("Log file name");
         m_output_iteration_history = prm.get_bool("Output iteration history");
+        m_phasefield_name = prm.get("Phase-field model type");
         m_am_convergence_criterion = prm.get("AM convergence strategy");
         m_plane_stress = prm.get_bool("Plane stress");
         m_type_linear_solver = prm.get("Linear solver type");
@@ -587,6 +730,12 @@ namespace PhaseField
 					   const double length_scale,
 					   const double viscosity,
 					   const double gc,
+					   const double tensile_strength,
+					   const double p,
+					   const double a1,
+					   const double a2,
+					   const double a3,
+					   const std::string & phasefield_name,
 					   const bool   plane_stress_flag)
       : m_lame_lambda(lame_lambda)
       , m_lame_mu(lame_mu)
@@ -594,6 +743,12 @@ namespace PhaseField
       , m_length_scale(length_scale)
       , m_eta(viscosity)
       , m_gc(gc)
+      , m_tensile_strength(tensile_strength)
+      , m_p(p)
+      , m_a1(a1)
+      , m_a2(a2)
+      , m_a3(a3)
+      , m_phasefield_name(phasefield_name)
       , m_plane_stress(plane_stress_flag)
       , m_phase_field_value(0.0)
       , m_grad_phasefield(Tensor<1, dim>())
@@ -654,74 +809,7 @@ namespace PhaseField
 			      const double phase_field_value,
 			      const Tensor<1, dim> & grad_phasefield,
 			      const double phase_field_value_previous_step,
-			      const double delta_time)
-    {
-      m_strain = strain;
-      m_phase_field_value = phase_field_value;
-      m_grad_phasefield = grad_phasefield;
-      Vector<double>              eigenvalues(dim);
-      std::vector<Tensor<1, dim>> eigenvectors(dim);
-      usr_spectrum_decomposition::spectrum_decomposition<dim>(m_strain,
-    							      eigenvalues,
-    							      eigenvectors);
-
-      SymmetricTensor<2, dim> strain_positive, strain_negative;
-      strain_positive = usr_spectrum_decomposition::positive_tensor(eigenvalues, eigenvectors);
-      strain_negative = usr_spectrum_decomposition::negative_tensor(eigenvalues, eigenvectors);
-
-      SymmetricTensor<4, dim> projector_positive, projector_negative;
-      usr_spectrum_decomposition::positive_negative_projectors(eigenvalues,
-    							       eigenvectors,
-							       projector_positive,
-							       projector_negative);
-
-      SymmetricTensor<2, dim> stress_positive, stress_negative;
-      const double degradation = degradation_function(m_phase_field_value) + m_residual_k;
-      const double I_1 = trace(m_strain);
-
-      // 2D plane strain and 3D cases
-      double my_lambda = m_lame_lambda;
-
-      // 2D plane stress case
-      if (    dim == 2
-           && m_plane_stress)
-	my_lambda = 2 * m_lame_mu * m_lame_lambda / (m_lame_lambda + 2 * m_lame_mu);
-
-      stress_positive = my_lambda * usr_spectrum_decomposition::positive_ramp_function(I_1)
-                                      * Physics::Elasticity::StandardTensors<dim>::I
-                      + 2 * m_lame_mu * strain_positive;
-      stress_negative = my_lambda * usr_spectrum_decomposition::negative_ramp_function(I_1)
-                                      * Physics::Elasticity::StandardTensors<dim>::I
-      		      + 2 * m_lame_mu * strain_negative;
-
-      m_stress = degradation * stress_positive + stress_negative;
-
-      SymmetricTensor<4, dim> C_positive, C_negative;
-      C_positive = my_lambda * usr_spectrum_decomposition::heaviside_function(I_1)
-                                 * Physics::Elasticity::StandardTensors<dim>::IxI
-		 + 2 * m_lame_mu * projector_positive;
-      C_negative = my_lambda * usr_spectrum_decomposition::heaviside_function(-I_1)
-                                 * Physics::Elasticity::StandardTensors<dim>::IxI
-      		 + 2 * m_lame_mu * projector_negative;
-      m_mechanical_C = degradation * C_positive + C_negative;
-
-      m_strain_energy_positive = 0.5 * my_lambda * usr_spectrum_decomposition::positive_ramp_function(I_1)
-                                                     * usr_spectrum_decomposition::positive_ramp_function(I_1)
-                               + m_lame_mu * strain_positive * strain_positive;
-
-      m_strain_energy_negative = 0.5 * my_lambda * usr_spectrum_decomposition::negative_ramp_function(I_1)
-                                                     * usr_spectrum_decomposition::negative_ramp_function(I_1)
-                               + m_lame_mu * strain_negative * strain_negative;
-
-      m_strain_energy_total = degradation * m_strain_energy_positive + m_strain_energy_negative;
-
-      m_crack_energy_dissipation = m_gc * (  0.5 / m_length_scale * m_phase_field_value * m_phase_field_value
-	                                   + 0.5 * m_length_scale * m_grad_phasefield * m_grad_phasefield)
-					 // the term due to viscosity regularization
-					 + (m_phase_field_value - phase_field_value_previous_step)
-					 * (m_phase_field_value - phase_field_value_previous_step)
-					 * 0.5 * m_eta / delta_time;
-    }
+			      const double delta_time);
 
   private:
     const double m_lame_lambda;
@@ -730,6 +818,12 @@ namespace PhaseField
     const double m_length_scale;
     const double m_eta;
     const double m_gc;
+    const double m_tensile_strength;
+    const double m_p;
+    const double m_a1;
+    const double m_a2;
+    const double m_a3;
+    const std::string m_phasefield_name;
     const bool m_plane_stress;
     double m_phase_field_value;
     Tensor<1, dim> m_grad_phasefield;
@@ -742,6 +836,91 @@ namespace PhaseField
     double m_crack_energy_dissipation;
   };
 
+  template <int dim>
+  void LinearIsotropicElasticityAdditiveSplit<dim>::
+    update_material_data(const SymmetricTensor<2, dim> & strain,
+			 const double phase_field_value,
+			 const Tensor<1, dim> & grad_phasefield,
+			 const double phase_field_value_previous_step,
+			 const double delta_time)
+  {
+    m_strain = strain;
+    m_phase_field_value = phase_field_value;
+    m_grad_phasefield = grad_phasefield;
+    Vector<double>              eigenvalues(dim);
+    std::vector<Tensor<1, dim>> eigenvectors(dim);
+    usr_spectrum_decomposition::spectrum_decomposition<dim>(m_strain,
+							  eigenvalues,
+							  eigenvectors);
+
+    SymmetricTensor<2, dim> strain_positive, strain_negative;
+    strain_positive = usr_spectrum_decomposition::positive_tensor(eigenvalues, eigenvectors);
+    strain_negative = usr_spectrum_decomposition::negative_tensor(eigenvalues, eigenvectors);
+
+    SymmetricTensor<4, dim> projector_positive, projector_negative;
+    usr_spectrum_decomposition::positive_negative_projectors(eigenvalues,
+							   eigenvectors,
+							   projector_positive,
+							   projector_negative);
+
+    SymmetricTensor<2, dim> stress_positive, stress_negative;
+    const double degradation = degradation_function(m_phase_field_value,
+						    m_p,
+						    m_a1,
+						    m_a2,
+						    m_a3,
+						    m_phasefield_name) + m_residual_k;
+    const double I_1 = trace(m_strain);
+
+    // 2D plane strain and 3D cases
+    double my_lambda = m_lame_lambda;
+
+    // 2D plane stress case
+    if (    dim == 2
+	 && m_plane_stress)
+    my_lambda = 2 * m_lame_mu * m_lame_lambda / (m_lame_lambda + 2 * m_lame_mu);
+
+    stress_positive = my_lambda * usr_spectrum_decomposition::positive_ramp_function(I_1)
+				    * Physics::Elasticity::StandardTensors<dim>::I
+		    + 2 * m_lame_mu * strain_positive;
+    stress_negative = my_lambda * usr_spectrum_decomposition::negative_ramp_function(I_1)
+				    * Physics::Elasticity::StandardTensors<dim>::I
+	            + 2 * m_lame_mu * strain_negative;
+
+    m_stress = degradation * stress_positive + stress_negative;
+
+    SymmetricTensor<4, dim> C_positive, C_negative;
+    C_positive = my_lambda * usr_spectrum_decomposition::heaviside_function(I_1)
+			       * Physics::Elasticity::StandardTensors<dim>::IxI
+	     + 2 * m_lame_mu * projector_positive;
+    C_negative = my_lambda * usr_spectrum_decomposition::heaviside_function(-I_1)
+			       * Physics::Elasticity::StandardTensors<dim>::IxI
+		     + 2 * m_lame_mu * projector_negative;
+    m_mechanical_C = degradation * C_positive + C_negative;
+
+    m_strain_energy_positive = 0.5 * my_lambda * usr_spectrum_decomposition::positive_ramp_function(I_1)
+						   * usr_spectrum_decomposition::positive_ramp_function(I_1)
+			     + m_lame_mu * strain_positive * strain_positive;
+
+    m_strain_energy_negative = 0.5 * my_lambda * usr_spectrum_decomposition::negative_ramp_function(I_1)
+						   * usr_spectrum_decomposition::negative_ramp_function(I_1)
+			     + m_lame_mu * strain_negative * strain_negative;
+
+    m_strain_energy_total = degradation * m_strain_energy_positive + m_strain_energy_negative;
+
+    const double phase_field_geo_value = phasefield_geometry_function(m_phase_field_value,
+    								      m_phasefield_name);
+    const double phase_field_coeff_constant = phasefield_coefficient_constant(m_phasefield_name);
+
+    m_crack_energy_dissipation = m_gc * (  1.0 / phase_field_coeff_constant / m_length_scale
+                                         * phase_field_geo_value
+                                         + m_length_scale / phase_field_coeff_constant
+	                                 * m_grad_phasefield * m_grad_phasefield)
+				     // the term due to viscosity regularization
+				     + (m_phase_field_value - phase_field_value_previous_step)
+				     * (m_phase_field_value - phase_field_value_previous_step)
+				     * 0.5 * m_eta / delta_time;
+  }
 
   template <int dim>
   class PointHistory
@@ -751,6 +930,10 @@ namespace PhaseField
       : m_length_scale(0.0)
       , m_gc(0.0)
       , m_viscosity(0.0)
+      , m_p(0.0)
+      , m_a1(0.0)
+      , m_a2(0.0)
+      , m_a3(0.0)
       , m_history_max_positive_strain_energy(0.0)
     {}
 
@@ -762,8 +945,18 @@ namespace PhaseField
 		   const double gc,
 		   const double viscosity,
 		   const double residual_k,
+		   const double tensile_strength,
+		   const double p,
+		   const double a2,
+		   const double a3,
+		   const std::string & phasefield_name,
 		   const bool   plane_stress_flag)
     {
+      const double E0 = lame_mu * (3*lame_lambda + 2*lame_mu) / (lame_lambda + lame_mu);
+      const double phasefield_geo_constant = phasefield_coefficient_constant(phasefield_name);
+      const double a1 = 4.0 / (phasefield_geo_constant * length_scale)
+		      * gc * E0 / (tensile_strength * tensile_strength);
+
       m_material =
               std::make_shared<LinearIsotropicElasticityAdditiveSplit<dim>>(lame_lambda,
         	                                                            lame_mu,
@@ -771,11 +964,31 @@ namespace PhaseField
 									    length_scale,
 									    viscosity,
 									    gc,
+									    tensile_strength,
+									    p,
+									    a1,
+									    a2,
+									    a3,
+									    phasefield_name,
 									    plane_stress_flag);
-      m_history_max_positive_strain_energy = 0.0;
+      if (phasefield_name == "AT2")
+	m_history_max_positive_strain_energy = 0.0;
+      else if (phasefield_name == "AT1")
+        m_history_max_positive_strain_energy = gc/(2*length_scale*phasefield_geo_constant);
+      else if (phasefield_name == "PFCZM")
+        m_history_max_positive_strain_energy = tensile_strength
+	    			             * tensile_strength / (2 * E0);
+      else
+        Assert(false,
+	       ExcMessage("The phase-field geometric function has not been implemented!"));
+
       m_length_scale = length_scale;
       m_gc = gc;
       m_viscosity = viscosity;
+      m_p = p;
+      m_a1 = a1;
+      m_a2 = a2;
+      m_a3 = a3;
 
       update_field_values(SymmetricTensor<2, dim>(), 0.0, Tensor<1, dim>(), 0.0, 1.0);
     }
@@ -857,11 +1070,36 @@ namespace PhaseField
     {
       return m_viscosity;
     }
+
+    double get_p() const
+    {
+      return m_p;
+    }
+
+    double get_a1() const
+    {
+      return m_a1;
+    }
+
+    double get_a2() const
+    {
+      return m_a2;
+    }
+
+    double get_a3() const
+    {
+      return m_a3;
+    }
+
   private:
     std::shared_ptr<LinearIsotropicElasticityAdditiveSplit<dim>> m_material;
     double m_length_scale;
     double m_gc;
     double m_viscosity;
+    double m_p;
+    double m_a1;
+    double m_a2;
+    double m_a3;
     double m_history_max_positive_strain_energy;
   };
 
@@ -962,10 +1200,15 @@ namespace PhaseField
     };
 
     Errors m_error_residual_displacement, m_error_update_displacement;
+    Errors m_error_residual_phasefield,   m_error_update_phasefield;
 
     void get_error_residual_displacement(Errors &error_residual);
     void get_error_update_displacement(const Vector<double> &newton_update,
                                        Errors & error_update);
+
+    void get_error_residual_phasefield(Errors &error_residual);
+    void get_error_update_phasefield(const Vector<double> &newton_update,
+                                     Errors & error_update);
 
     void make_grid();
     void make_grid_case_1();
@@ -973,12 +1216,14 @@ namespace PhaseField
     void make_grid_case_3();
     void make_grid_case_4();
     void make_grid_case_9();
+    void make_grid_case_12();
 
     void setup_system();
     void setup_system_phasefield();
     void setup_system_displacement();
 
-    void make_constraints_phasefield();
+    void make_constraints_phasefield(const unsigned int it_nr,
+				     const unsigned int itr_stagger);
     void make_constraints_displacement(const unsigned int it_nr,
 				       const unsigned int itr_stagger);
 
@@ -988,14 +1233,17 @@ namespace PhaseField
     void assemble_rhs_phasefield();
     void assemble_rhs_displacement();
 
-    void phasefield_step();
-    void solve_linear_system_phasefield();
+    unsigned int phasefield_step(unsigned int itr_stagger);
+    unsigned int solve_nonlinear_phasefield_newton_raphson(Vector<double> &solution_delta_phasefield,
+    				    		           unsigned int itr_stagger);
+    void solve_linear_system_phasefield(Vector<double> & newton_update);
+
     unsigned int displacement_step(unsigned int itr_stagger);
     unsigned int solve_nonlinear_displacement_newton_raphson(Vector<double> &solution_delta_displacement,
 				    		             unsigned int itr_stagger);
     void solve_linear_system_displacement(Vector<double> & newton_update);
+
     void update_history_field_step();
-    void update_phasefield();
 
     void output_results() const;
     void assemble_system_one_cell_phasefield(const typename DoFHandler<dim>::active_cell_iterator &cell,
@@ -1014,7 +1262,8 @@ namespace PhaseField
 
     void setup_qph();
 
-    void update_qph_incremental(const Vector<double> &solution_delta_displacement);
+    void update_qph_incremental(const Vector<double> &solution_delta_displacement,
+				const Vector<double> &solution_delta_phasefield);
 
     void update_qph_incremental_one_cell(
       const IteratorPair & synchronous_iterators,
@@ -1028,6 +1277,9 @@ namespace PhaseField
 
     Vector<double>
     get_total_solution_u(const Vector<double> &solution_delta_displacement) const;
+
+    Vector<double>
+    get_total_solution_d(const Vector<double> &solution_delta_phasefield) const;
 
     // Should not make this function const
     void read_material_data(const std::string &data_file,
@@ -1064,6 +1316,18 @@ namespace PhaseField
   }
 
   template <int dim>
+  void PhaseFieldSplitSolve<dim>::get_error_residual_phasefield(Errors &error_residual)
+  {
+    Vector<double> error_res(m_dof_handler_phasefield.n_dofs());
+
+    for (unsigned int i = 0; i < m_dof_handler_phasefield.n_dofs(); ++i)
+      if (!m_constraints_phasefield.is_constrained(i))
+        error_res(i) = m_system_rhs_phasefield(i);
+
+    error_residual.m_norm = error_res.l2_norm();
+  }
+
+  template <int dim>
   void PhaseFieldSplitSolve<dim>::get_error_update_displacement(const Vector<double> &newton_update,
                                                                 Errors & error_update)
   {
@@ -1076,12 +1340,29 @@ namespace PhaseField
   }
 
   template <int dim>
+  void PhaseFieldSplitSolve<dim>::get_error_update_phasefield(const Vector<double> &newton_update,
+                                                              Errors & error_update)
+  {
+    Vector<double> error_ud(m_dof_handler_phasefield.n_dofs());
+    for (unsigned int i = 0; i < m_dof_handler_phasefield.n_dofs(); ++i)
+      if (!m_constraints_phasefield.is_constrained(i))
+        error_ud(i) = newton_update(i);
+
+    error_update.m_norm = error_ud.l2_norm();
+  }
+
+  template <int dim>
   void PhaseFieldSplitSolve<dim>::read_material_data(const std::string &data_file,
 				                     const unsigned int total_material_regions)
   {
     std::ifstream myfile (data_file);
 
     double lame_lambda, lame_mu, length_scale, gc, viscosity, residual_k;
+    // add the material tensile strength for non AT-2 models
+    double tensile_strength;
+    double p;
+    double a2;
+    double a3;
     int material_region;
     double poisson_ratio;
     if (myfile.is_open())
@@ -1094,25 +1375,90 @@ namespace PhaseField
 		       >> length_scale
 		       >> gc
 		       >> viscosity
-		       >> residual_k)
+		       >> residual_k
+		       >> tensile_strength
+		       >> p
+		       >> a2
+		       >> a3)
           {
             m_material_data[material_region] = {lame_lambda,
         	                                lame_mu,
 						length_scale,
 						gc,
 						viscosity,
-                                                residual_k};
+                                                residual_k,
+						tensile_strength,
+						p,
+						a2,
+						a3};
             poisson_ratio = lame_lambda / (2*(lame_lambda + lame_mu));
             Assert( (poisson_ratio <= 0.5)&(poisson_ratio >=-1.0) , ExcInternalError());
+
+            const double c_alpha = phasefield_coefficient_constant(m_parameters.m_phasefield_name);
+	    const double E0 = lame_mu * (3*lame_lambda + 2*lame_mu) / (lame_lambda + lame_mu);
 
             m_logfile << "\tRegion " << material_region << " : " << std::endl;
             m_logfile << "\t\tLame lambda = " << lame_lambda << std::endl;
             m_logfile << "\t\tLame mu = "  << lame_mu << std::endl;
+            m_logfile << "\t\tYoung's modulus (E0) = "  << E0 << std::endl;
             m_logfile << "\t\tPoisson ratio = "  << poisson_ratio << std::endl;
             m_logfile << "\t\tPhase field length scale (l) = " << length_scale << std::endl;
             m_logfile << "\t\tCritical energy release rate (gc) = "  << gc << std::endl;
             m_logfile << "\t\tViscosity for regularization (eta) = "  << viscosity << std::endl;
             m_logfile << "\t\tResidual_k (k) = "  << residual_k << std::endl;
+            m_logfile << "\t\tTensile strength (ft) = "  << tensile_strength << std::endl;
+	    m_logfile << "\t\tp = "  << p << std::endl;
+	    m_logfile << "\t\ta2 = "  << a2 << std::endl;
+	    m_logfile << "\t\ta3 = "  << a3 << std::endl;
+
+	    if (m_parameters.m_phasefield_name == "AT2")
+	      m_logfile << "\t\tFor AT-2 model, tensile-strength (ft), p, a2, and a3 are irrelevant."
+		        << std::endl;
+
+	    if (m_parameters.m_phasefield_name == "AT1")
+	      {
+	        const double proper_l = gc * E0 / (c_alpha * tensile_strength * tensile_strength);
+	        const double proper_ft = std::sqrt( gc * E0 / (c_alpha * length_scale) );
+
+	        m_logfile << "\t\tFor AT-1 model, the provided tensile strength (ft) = "
+		          << tensile_strength << std::endl;
+		m_logfile << "\t\tHowever, based on the formular ft = sqrt[gc*E0/(c_alpha*l)]," << std::endl;
+	        m_logfile << "\t\tthe actual material tensile strength should be "
+			  << proper_ft << std::endl;
+		m_logfile << "\t\tOr in order to use the provided strength (" << tensile_strength << "),"
+			  << std::endl;
+		m_logfile << "\t\tthe actual length-scale l should be "
+			  << proper_l << std::endl;
+		m_logfile << "\t\tFor AT-1 model, p, a2, and a3 are irrelevant."
+		          << std::endl;
+	      }
+
+            if (m_parameters.m_phasefield_name == "PFCZM")
+              {
+        	double lch = gc * E0 / (tensile_strength*tensile_strength);
+        	double coeff = 4.0 / (c_alpha * (a2 + p + 0.5));
+        	double upper_l = lch * coeff;
+
+        	m_logfile << "\t\tThe provided length-scale l (" << length_scale
+        	          << ") should be smaller than the upper limit "
+        	          << upper_l << std::endl;
+
+        	m_logfile << "\t\tIf the first step has negative total energy, "
+        	          << "the length-scale should be reduced further"
+			  << std::endl;
+
+        	AssertThrow(length_scale < upper_l,
+			    ExcMessage("The provided length-scale is over the "
+				       "upper limit!"));
+
+        	m_logfile << "\t\tSuggested parameters:" << std::endl;
+        	m_logfile << "\t\t\tLinear softening curve: "
+        	          << "p = 2.0, a2 = -0.5, a3 = 0;" << std::endl;
+        	m_logfile << "\t\t\tExponential softening curve: "
+        	          << "p = 2.5, a2 = 0.1748, a3 = 0;" << std::endl;
+        	m_logfile << "\t\t\tCornelissen softening curve: "
+        	          << "p = 2.0, a2 = 1.3868, a3 = 0.9106 or 0.6566;" << std::endl;
+              }
           }
 
         if (m_material_data.size() != total_material_regions)
@@ -1198,6 +1544,10 @@ namespace PhaseField
     double gc = 0.0;
     double viscosity = 0.0;
     double residual_k = 0.0;
+    double tensile_strength = 0.0;
+    double p = 0.0;
+    double a2 = 0.0;
+    double a3 = 0.0;
 
     for (const auto &cell : m_triangulation.active_cell_iterators())
       {
@@ -1210,6 +1560,10 @@ namespace PhaseField
             gc                         = m_material_data[material_id][3];
             viscosity                  = m_material_data[material_id][4];
             residual_k                 = m_material_data[material_id][5];
+            tensile_strength           = m_material_data[material_id][6];
+	    p                          = m_material_data[material_id][7];
+	    a2                         = m_material_data[material_id][8];
+	    a3                         = m_material_data[material_id][9];
 	  }
         else
           {
@@ -1224,7 +1578,9 @@ namespace PhaseField
 
         for (unsigned int q_point = 0; q_point < m_n_q_points; ++q_point)
           lqph[q_point]->setup_lqp(lame_lambda, lame_mu, length_scale,
-				   gc, viscosity, residual_k,
+				   gc, viscosity, residual_k, tensile_strength,
+				   p, a2, a3,
+				   m_parameters.m_phasefield_name,
 				   m_parameters.m_plane_stress);
       }
   }
@@ -1239,20 +1595,23 @@ namespace PhaseField
   }
 
   template <int dim>
-  void PhaseFieldSplitSolve<dim>::update_phasefield()
+  Vector<double> PhaseFieldSplitSolve<dim>::get_total_solution_d(
+    const Vector<double> &solution_delta_phasefield) const
   {
-    Vector<double> solution_delta_displacement(m_dof_handler_displacement.n_dofs());
-    solution_delta_displacement = 0.0;
-    update_qph_incremental(solution_delta_displacement);
+    Vector<double> solution_total_phasefield(m_solution_phasefield);
+    solution_total_phasefield += solution_delta_phasefield;
+    return solution_total_phasefield;
   }
 
   template <int dim>
   void
-  PhaseFieldSplitSolve<dim>::update_qph_incremental(const Vector<double> &solution_delta_displacement)
+  PhaseFieldSplitSolve<dim>::update_qph_incremental(const Vector<double> &solution_delta_displacement,
+						    const Vector<double> &solution_delta_phasefield)
   {
     m_timer.enter_subsection("Update QPH data");
 
     const Vector<double> solution_total_displacement(get_total_solution_u(solution_delta_displacement));
+    const Vector<double> solution_total_phasefield(get_total_solution_d(solution_delta_phasefield));
 
     const UpdateFlags uf_UQPH(update_values | update_gradients);
     PerTaskData_UQPH  per_task_data_UQPH;
@@ -1261,7 +1620,7 @@ namespace PhaseField
 					m_qf_cell,
 					uf_UQPH,
 					solution_total_displacement,
-					m_solution_phasefield,
+					solution_total_phasefield,
 					m_solution_previous_timestep_phasefield);
 
     auto worker = [this](const IteratorPair & synchronous_iterators,
@@ -1732,6 +2091,8 @@ namespace PhaseField
       make_grid_case_4();
     else if (m_parameters.m_scenario == 9)
       make_grid_case_9();
+    else if (m_parameters.m_scenario == 12)
+      make_grid_case_12();
     else
       Assert(false, ExcMessage("The scenario has not been implemented!"));
 
@@ -2199,6 +2560,51 @@ namespace PhaseField
   }
 
   template <int dim>
+  void PhaseFieldSplitSolve<dim>::make_grid_case_12()
+  {
+    for (unsigned int i = 0; i < 80; ++i)
+      m_logfile << "*";
+    m_logfile << std::endl;
+    m_logfile << "\t\t\t1-D bar (structured)" << std::endl;
+    for (unsigned int i = 0; i < 80; ++i)
+      m_logfile << "*";
+    m_logfile << std::endl;
+
+    AssertThrow(dim==2, ExcMessage("The dimension has to be 2D!"));
+
+    double const length = 200.0;
+    double const width = 1.0;
+    double const h_size = 0.1;
+
+    std::vector<unsigned int> repetitions(dim, 1);
+    repetitions[0] = length / h_size;
+    repetitions[1] = width  / h_size;
+
+    GridGenerator::subdivided_hyper_rectangle(m_triangulation,
+				     	      repetitions,
+					      Point<dim>( 0.0,      0.0 ),
+					      Point<dim>( length,   width ) );
+
+    for (const auto &cell : m_triangulation.active_cell_iterators())
+      for (const auto &face : cell->face_iterators())
+	{
+	  if (face->at_boundary() == true)
+	    {
+	      if ( (std::fabs(face->center()[0] - 0.0 ) < 1.0e-9) )
+		face->set_boundary_id(0);
+	      else if ( (std::fabs(face->center()[0] - length ) < 1.0e-9) )
+		face->set_boundary_id(1);
+	      else if ( (std::fabs(face->center()[1] - 0.0 ) < 1.0e-9) )
+		face->set_boundary_id(2);
+	      else if ( (std::fabs(face->center()[1] - width ) < 1.0e-9) )
+		face->set_boundary_id(3);
+	      else
+		face->set_boundary_id(4);
+	    }
+	}
+  }
+
+  template <int dim>
   void PhaseFieldSplitSolve<dim>::setup_system()
   {
     m_timer.enter_subsection("Setup system");
@@ -2249,15 +2655,6 @@ namespace PhaseField
     m_sparsity_pattern_phasefield.copy_from(dsp);
 
     m_system_matrix_phasefield.reinit(m_sparsity_pattern_phasefield);
-
-    m_logfile << "\t\tTriangulation (phase-field):"
-              << "\n\t\t\t Number of active cells: "
-              << m_triangulation.n_active_cells()
-              << "\n\t\t\t Number of used vertices: "
-              << m_triangulation.n_used_vertices()
-              << "\n\t\t\t Number of degrees of freedom (phase-field): "
-	      << m_dof_handler_phasefield.n_dofs()
-              << std::endl;
   }
 
   template <int dim>
@@ -2283,10 +2680,52 @@ namespace PhaseField
   }
 
   template <int dim>
-  void PhaseFieldSplitSolve<dim>::make_constraints_phasefield()
+  void PhaseFieldSplitSolve<dim>::make_constraints_phasefield(const unsigned int it_nr,
+						              const unsigned int itr_stagger)
   {
-    m_constraints_phasefield.clear();
-    DoFTools::make_hanging_node_constraints(m_dof_handler_phasefield, m_constraints_phasefield);
+    // The staggered iteration starts from 1
+    const bool apply_dirichlet_bc = ( (it_nr == 0) && (itr_stagger == 1) );
+
+    if ( (it_nr > 1) || (itr_stagger > 1) )
+      {
+        //m_logfile << " --- " << std::flush;
+        return;
+      }
+
+    if (apply_dirichlet_bc)
+      {
+        m_constraints_phasefield.clear();
+        DoFTools::make_hanging_node_constraints(m_dof_handler_phasefield,
+						m_constraints_phasefield);
+        if (m_parameters.m_scenario == 12)
+	  {
+	    // Dirichlet B.C. left surface (x = 0)
+	    const int boundary_id_left_surface = 0;
+	    VectorTools::interpolate_boundary_values(m_dof_handler_phasefield,
+						     boundary_id_left_surface,
+						     Functions::ZeroFunction<dim>(),
+						     m_constraints_phasefield);
+
+	    const int boundary_id_right_surface = 1;
+	    VectorTools::interpolate_boundary_values(m_dof_handler_phasefield,
+						     boundary_id_right_surface,
+						     Functions::ZeroFunction<dim>(),
+						     m_constraints_phasefield);
+	  }
+      }
+    else  // inhomogeneous constraints
+      {
+	if (m_constraints_phasefield.has_inhomogeneities())
+	  {
+	    AffineConstraints<double> homogeneous_constraints(m_constraints_phasefield);
+	    for (unsigned int dof = 0; dof != m_dof_handler_phasefield.n_dofs(); ++dof)
+	      if (homogeneous_constraints.is_inhomogeneously_constrained(dof))
+		homogeneous_constraints.set_inhomogeneity(dof, 0.0);
+
+	    m_constraints_phasefield.clear();
+	    m_constraints_phasefield.copy_from(homogeneous_constraints);
+	  }
+      }
     m_constraints_phasefield.close();
   }
 
@@ -2508,6 +2947,45 @@ namespace PhaseField
 		  }
 	      }
 	  }
+	else if (m_parameters.m_scenario == 12)
+	  {
+	    // Dirichlet B.C. left surface (x = 0)
+	    const int boundary_id_left_surface = 0;
+	    VectorTools::interpolate_boundary_values(m_dof_handler_displacement,
+						     boundary_id_left_surface,
+						     Functions::ZeroFunction<dim>(dim),
+						     m_constraints_displacement);
+
+	    const int boundary_id_right_surface = 1;
+	    VectorTools::interpolate_boundary_values(m_dof_handler_displacement,
+						     boundary_id_right_surface,
+						     Functions::ZeroFunction<dim>(dim),
+						     m_constraints_displacement,
+						     m_fe_displacement.component_mask(y_displacement));
+
+	    const double time_inc = m_time.get_delta_t();
+	    double disp_magnitude = m_time.get_magnitude();
+	    VectorTools::interpolate_boundary_values(m_dof_handler_displacement,
+						     boundary_id_right_surface,
+						     Functions::ConstantFunction<dim>(
+						       disp_magnitude*time_inc, dim),
+						     m_constraints_displacement,
+						     m_fe_displacement.component_mask(x_displacement));
+
+	    const int boundary_id_bottom_surfaces = 2;
+	    VectorTools::interpolate_boundary_values(m_dof_handler_displacement,
+						     boundary_id_bottom_surfaces,
+						     Functions::ZeroFunction<dim>(dim),
+						     m_constraints_displacement,
+						     m_fe_displacement.component_mask(y_displacement));
+
+	    const int boundary_id_top_surfaces = 3;
+	    VectorTools::interpolate_boundary_values(m_dof_handler_displacement,
+						     boundary_id_top_surfaces,
+						     Functions::ZeroFunction<dim>(dim),
+						     m_constraints_displacement,
+						     m_fe_displacement.component_mask(y_displacement));
+	  }
 	else
 	  Assert(false, ExcMessage("The scenario has not been implemented!"));
       }
@@ -2568,27 +3046,62 @@ namespace PhaseField
 	const double eta                   = lqph[q_point]->get_viscosity();
 	const double history_strain_energy = lqph[q_point]->get_history_max_positive_strain_energy();
 	const double current_positive_strain_energy = lqph[q_point]->get_current_positive_strain_energy();
+	const double p = lqph[q_point]->get_p();
+	const double a1 = lqph[q_point]->get_a1();
+	const double a2 = lqph[q_point]->get_a2();
+	const double a3 = lqph[q_point]->get_a3();
 
 	double history_value = history_strain_energy;
 	if (current_positive_strain_energy > history_strain_energy)
 	  history_value = current_positive_strain_energy;
+
+	const double phasefield_value        = lqph[q_point]->get_phase_field_value();
+	const Tensor<1, dim> phasefield_grad = lqph[q_point]->get_phase_field_gradient();
 
         const std::vector<double>         &      N = scratch.m_Nx[q_point];
         const std::vector<Tensor<1, dim>> & grad_N = scratch.m_grad_Nx[q_point];
         const double                old_phasefield = scratch.m_old_phasefield[q_point];
         const double                           JxW = scratch.m_fe_values.JxW(q_point);
 
+	const double phasefield_coeff_const = phasefield_coefficient_constant(m_parameters.m_phasefield_name);
+
+	const double phasefield_geo_derivative
+		   = phasefield_geometry_function_derivative(phasefield_value,
+							     m_parameters.m_phasefield_name);
+
+	const double phasefield_geo_2nd_order_derivative
+		   = phasefield_geometry_function_2nd_order_derivative(phasefield_value,
+								       m_parameters.m_phasefield_name);
+
         for (unsigned int i : scratch.m_fe_values.dof_indices())
           {
 	    for (unsigned int j : scratch.m_fe_values.dof_indices_ending_at(i))
 	      {
-		data.m_cell_matrix(i, j) += (  (gc/length_scale + eta/delta_time + 2.0*history_value)
-		                             * N[i] * N[j]
-				             + gc * length_scale * grad_N[i] * grad_N[j] )
-				           * JxW;
+		data.m_cell_matrix(i, j) += (  (   gc/length_scale/phasefield_coeff_const
+						 * phasefield_geo_2nd_order_derivative
+						 + eta/delta_time
+						 + degradation_function_2nd_order_derivative(phasefield_value,
+					  					             p, a1, a2, a3,
+											     m_parameters.m_phasefield_name)
+						 * history_value  )
+					         * N[i] * N[j]
+				               + 2.0 / phasefield_coeff_const * gc * length_scale
+					       * grad_N[i] * grad_N[j]
+					     ) * JxW;
+
+
 	      } // j
-	    data.m_cell_rhs(i) += (  eta/delta_time * N[i] * old_phasefield
-		                   + 2.0 * N[i] * history_value ) * JxW;
+	    data.m_cell_rhs(i) -= (   2.0 / phasefield_coeff_const * gc * length_scale
+	        	            * grad_N[i] * phasefield_grad
+	        	            +  (   gc / length_scale / phasefield_coeff_const
+	        	                 * phasefield_geo_derivative
+	    			         + eta / delta_time  * (phasefield_value - old_phasefield)
+	    			         + degradation_function_derivative(phasefield_value,
+	    							           p, a1, a2, a3,
+	    								   m_parameters.m_phasefield_name)
+	    			         * history_value )
+	    			    * N[i]
+	    		          ) * JxW;
           } // i
       } // q_point
 
@@ -2722,6 +3235,10 @@ namespace PhaseField
 	const double eta                   = lqph[q_point]->get_viscosity();
 	const double history_strain_energy = lqph[q_point]->get_history_max_positive_strain_energy();
 	const double current_positive_strain_energy = lqph[q_point]->get_current_positive_strain_energy();
+	const double p = lqph[q_point]->get_p();
+	const double a1 = lqph[q_point]->get_a1();
+	const double a2 = lqph[q_point]->get_a2();
+	const double a3 = lqph[q_point]->get_a3();
 
 	double history_value = history_strain_energy;
 	if (current_positive_strain_energy > history_strain_energy)
@@ -2735,12 +3252,23 @@ namespace PhaseField
         const double                old_phasefield = scratch.m_old_phasefield[q_point];
         const double                           JxW = scratch.m_fe_values.JxW(q_point);
 
+        const double phasefield_coeff_const = phasefield_coefficient_constant(m_parameters.m_phasefield_name);
+
+        const double phasefield_geo_derivative
+        	   = phasefield_geometry_function_derivative(phasefield_value,
+        						     m_parameters.m_phasefield_name);
+
         for (unsigned int i : scratch.m_fe_values.dof_indices())
           {
-	    data.m_cell_rhs(i) += (    gc * length_scale * grad_N[i] * phasefield_grad
-				    +  (   gc / length_scale * phasefield_value
+	    data.m_cell_rhs(i) += (  2.0 * gc * length_scale / phasefield_coeff_const
+		                         * grad_N[i] * phasefield_grad
+				    +  (   gc / length_scale / phasefield_coeff_const
+	                                 * phasefield_geo_derivative
 					 + eta / delta_time  * (phasefield_value - old_phasefield)
-					 + degradation_function_derivative(phasefield_value) * history_value )
+					 + degradation_function_derivative(phasefield_value,
+									   p, a1, a2, a3,
+									   m_parameters.m_phasefield_name)
+				         * history_value )
 				      * N[i]
 				  ) * JxW;
           } // i
@@ -3045,9 +3573,9 @@ namespace PhaseField
   }
 
   template <int dim>
-  void PhaseFieldSplitSolve<dim>::solve_linear_system_phasefield()
+  void PhaseFieldSplitSolve<dim>::solve_linear_system_phasefield(Vector<double> & newton_update)
   {
-    m_timer.enter_subsection("Solve phase field linear system");
+    m_timer.enter_subsection("Solve phase-field linear system");
 
 /*
     {
@@ -3073,7 +3601,7 @@ namespace PhaseField
       {
         SparseDirectUMFPACK A_direct;
         A_direct.initialize(m_system_matrix_phasefield);
-        A_direct.vmult(m_solution_phasefield,
+        A_direct.vmult(newton_update,
 	               m_system_rhs_phasefield);
       }
     else if (m_parameters.m_type_linear_solver == "CG")
@@ -3085,7 +3613,7 @@ namespace PhaseField
 	preconditioner_phasefield.initialize(m_system_matrix_phasefield, 1.0);
 
 	cg_phasefield.solve(m_system_matrix_phasefield,
-			    m_solution_phasefield,
+			    newton_update,
 			    m_system_rhs_phasefield,
 			    preconditioner_phasefield);
       }
@@ -3095,18 +3623,20 @@ namespace PhaseField
 	            ExcMessage("Selected linear solver not implemented for the phase-field subproblem!"));
       }
 
-    m_constraints_phasefield.distribute(m_solution_phasefield);
+    m_constraints_phasefield.distribute(newton_update);
 
     m_timer.leave_subsection();
   }
 
   template <int dim>
-  void PhaseFieldSplitSolve<dim>::phasefield_step()
+  unsigned int PhaseFieldSplitSolve<dim>::phasefield_step(unsigned int itr_stagger)
   {
-    make_constraints_phasefield();
-    assemble_system_phasefield();
-    solve_linear_system_phasefield();
-    update_phasefield();
+    Vector<double> solution_delta_phasefield(m_dof_handler_phasefield.n_dofs());
+    solution_delta_phasefield = 0.0;
+    unsigned int newton_itrs_required = 0;
+    newton_itrs_required = solve_nonlinear_phasefield_newton_raphson(solution_delta_phasefield, itr_stagger);
+    m_solution_phasefield += solution_delta_phasefield;
+    return newton_itrs_required;
   }
 
   template <int dim>
@@ -3188,18 +3718,19 @@ namespace PhaseField
   template <int dim>
   void PhaseFieldSplitSolve<dim>::print_conv_header()
   {
-    static const unsigned int l_width = 133;
+    static const unsigned int l_width = 138;
     m_logfile << '\t';
     for (unsigned int i = 0; i < l_width; ++i)
       m_logfile << '_';
     m_logfile << std::endl;
 
     m_logfile << "\tAM-itr\t"
-              << "Subproblem  "
-              << "No. Newton    Res.       Inc.   "
-              << "   Subproblem  "
-	      << "      Res_u"
-	      << "      Res_d"
+              << "Sub-u   "
+              << "No.NR    Res.      Inc.    "
+              << "Sub-d  "
+	      << "No.NR  Res.      Inc.   "
+	      << "    Res_u"
+	      << "     Res_d"
 	      << "      Inc_u"
 	      << "      Inc_d"
 	      << "      Energy"
@@ -3222,19 +3753,21 @@ namespace PhaseField
     m_error_update_displacement.reset();
 
     unsigned int newton_iteration = 0;
-    for (; newton_iteration < m_parameters.m_max_iterations_newton; ++newton_iteration)
+    for (; newton_iteration <= m_parameters.m_max_iterations_newton; ++newton_iteration)
       {
         make_constraints_displacement(newton_iteration, itr_stagger);
         assemble_system_displacement();
 
         get_error_residual_displacement(m_error_residual_displacement);
 
-        if (    newton_iteration > 0
-	     && m_error_residual_displacement.m_norm <= 1.0e-9
-             && m_error_update_displacement.m_norm <= 1.0e-6 )
+        if (   (    newton_iteration > 0
+	         && m_error_residual_displacement.m_norm <= 1.0e-9 )
+            || (newton_iteration == m_parameters.m_max_iterations_newton)
+             //&& m_error_update_displacement.m_norm <= 1.0e-6
+	     )
           {
 	    if (m_parameters.m_output_iteration_history)
-	      m_logfile << "  \t" << newton_iteration << "\t"
+	      m_logfile << "  " << newton_iteration << "  "
 			<< std::setprecision(3)
 			<< std::setw(7)
 			<< std::scientific
@@ -3250,11 +3783,74 @@ namespace PhaseField
         get_error_update_displacement(newton_update, m_error_update_displacement);
 
         solution_delta_displacement += newton_update;
-        update_qph_incremental(solution_delta_displacement);
+
+        Vector<double> solution_delta_phasefield(m_dof_handler_phasefield.n_dofs());
+        solution_delta_phasefield = 0.0;
+
+        update_qph_incremental(solution_delta_displacement,
+			       solution_delta_phasefield);
       }
 
-    AssertThrow(newton_iteration < m_parameters.m_max_iterations_newton,
-                ExcMessage("No convergence in nonlinear solver!"));
+    //AssertThrow(newton_iteration < m_parameters.m_max_iterations_newton,
+    //            ExcMessage("No convergence in nonlinear solver "
+    //                       "for the displacement problem!"));
+
+    return newton_iteration;
+  }
+
+
+  template <int dim>
+  unsigned int PhaseFieldSplitSolve<dim>::
+  solve_nonlinear_phasefield_newton_raphson(Vector<double> & solution_delta_phasefield,
+					    unsigned int itr_stagger)
+  {
+    Vector<double> newton_update(m_dof_handler_phasefield.n_dofs());
+
+    m_error_residual_phasefield.reset();
+    m_error_update_phasefield.reset();
+
+    unsigned int newton_iteration = 0;
+    for (; newton_iteration <= m_parameters.m_max_iterations_newton; ++newton_iteration)
+      {
+        make_constraints_phasefield(newton_iteration, itr_stagger);
+        assemble_system_phasefield();
+
+        get_error_residual_phasefield(m_error_residual_phasefield);
+
+        if (   (   newton_iteration > 0
+	        && m_error_residual_phasefield.m_norm <= 1.0e-12)
+            || (newton_iteration == m_parameters.m_max_iterations_newton)
+             //&& m_error_update_phasefield.m_norm <= 1.0e-6
+	     )
+          {
+	    if (m_parameters.m_output_iteration_history)
+	      m_logfile << "  " << newton_iteration << "  "
+			<< std::setprecision(3)
+			<< std::setw(7)
+			<< std::scientific
+			<< m_error_residual_phasefield.m_norm
+			<< "  "
+			<< m_error_update_phasefield.m_norm
+			<< std::flush;
+            break;
+          }
+
+        solve_linear_system_phasefield(newton_update);
+
+        get_error_update_phasefield(newton_update, m_error_update_phasefield);
+
+        solution_delta_phasefield += newton_update;
+
+        Vector<double> solution_delta_displacement(m_dof_handler_displacement.n_dofs());
+        solution_delta_displacement = 0.0;
+
+        update_qph_incremental(solution_delta_displacement,
+			       solution_delta_phasefield);
+      }
+
+    //AssertThrow(newton_iteration < m_parameters.m_max_iterations_newton,
+    //            ExcMessage("No convergence in nonlinear solver "
+    //                       "for the phase-field problem!"));
 
     return newton_iteration;
   }
@@ -3598,6 +4194,7 @@ namespace PhaseField
     m_logfile << "Log file = " << m_parameters.m_logfile_name << std::endl;
     m_logfile << "Write iteration history to log file? = " << std::boolalpha
 	      << m_parameters.m_output_iteration_history << std::endl;
+    m_logfile << "Phase-field model type = " << m_parameters.m_phasefield_name << std::endl;
     m_logfile << "Alternate minimization convergence criterion = "
 	      << m_parameters.m_am_convergence_criterion << std::endl;
     if (dim == 2)
@@ -3706,7 +4303,10 @@ namespace PhaseField
 	    dof_handler_L2.distribute_dofs(fe_L2);
 	    AffineConstraints<double> constraints;
 	    constraints.clear();
-	    DoFTools::make_hanging_node_constraints(dof_handler_L2, constraints);
+	    //Since we use discontinuous Lagrange polynomials as shape functions
+	    //we don't need to worry about enforcing continuity of the history variable
+	    //at hanging nodes.
+	    //DoFTools::make_hanging_node_constraints(dof_handler_L2, constraints);
 	    constraints.close();
 
 	    Vector<double> old_history_variable_field_L2;
@@ -3737,7 +4337,10 @@ namespace PhaseField
 
 	    dof_handler_L2.distribute_dofs(fe_L2);
 	    constraints.clear();
-	    DoFTools::make_hanging_node_constraints(dof_handler_L2, constraints);
+	    //Since we use discontinuous Lagrange polynomials as shape functions
+	    //we don't need to worry about enforcing continuity of the history variable
+	    //at hanging nodes.
+	    //DoFTools::make_hanging_node_constraints(dof_handler_L2, constraints);
 	    constraints.close();
 
 	    Vector<double> tmp_solution_previous_u;
@@ -3783,7 +4386,10 @@ namespace PhaseField
 	    m_constraints_displacement.distribute(m_solution_previous_timestep_displacement);
 	    m_constraints_phasefield.distribute(m_solution_previous_timestep_phasefield);
 	    m_constraints_phasefield.distribute(m_solution_phasefield);
-	    constraints.distribute(new_history_variable_field_L2);
+	    //Since we use discontinuous Lagrange polynomials as shape functions
+	    //we don't need to worry about enforcing continuity of the history variable
+	    //at hanging nodes.
+	    //constraints.distribute(new_history_variable_field_L2);
 
 	    // new_history_variable_field_L2 contains the history variable projected
 	    // onto the newly refined mesh
@@ -3820,8 +4426,16 @@ namespace PhaseField
 
 	Vector<double> solution_delta_u(m_dof_handler_displacement.n_dofs());
 	solution_delta_u = 0.0;
-	update_qph_incremental(solution_delta_u);
-	update_history_field_step();
+	Vector<double> solution_delta_d(m_dof_handler_phasefield.n_dofs());
+	solution_delta_d = 0.0;
+	update_qph_incremental(solution_delta_u,
+			       solution_delta_d);
+
+	m_logfile << "\t\tUpdate field variables" << std::endl;
+
+	//Since we want to map the history variable in the previous time step
+	//from the coarse mesh to the refined mesh, we should not update them here.
+	//update_history_field_step();
       }
 
     return mesh_is_same;
@@ -3896,9 +4510,8 @@ namespace PhaseField
 		linear_solve_needed += displacement_step(iter_am);
 
 		if (m_parameters.m_output_iteration_history)
-		  m_logfile << "  PF-sub (linear)" << std::flush;
-		phasefield_step();
-		linear_solve_needed += 1;
+		  m_logfile << "  PF-sub" << std::flush;
+		linear_solve_needed += phasefield_step(iter_am);
 
 		// calculate the displacement residual
 		assemble_rhs_displacement();
@@ -3954,7 +4567,7 @@ namespace PhaseField
 		    if (m_parameters.m_output_iteration_history)
 		      {
 			m_logfile << '\t';
-			for (unsigned int i = 0; i < 133; ++i)
+			for (unsigned int i = 0; i < 138; ++i)
 			  m_logfile << '_';
 			m_logfile << std::endl;
 		      }
@@ -3986,7 +4599,7 @@ namespace PhaseField
 			if (m_parameters.m_output_iteration_history)
 			  {
 			    m_logfile << '\t';
-			    for (unsigned int i = 0; i < 133; ++i)
+			    for (unsigned int i = 0; i < 138; ++i)
 			      m_logfile << '_';
 			    m_logfile << std::endl;
 			  }
@@ -4018,7 +4631,7 @@ namespace PhaseField
 			if (m_parameters.m_output_iteration_history)
 			  {
 			    m_logfile << '\t';
-			    for (unsigned int i = 0; i < 133; ++i)
+			    for (unsigned int i = 0; i < 138; ++i)
 			      m_logfile << '_';
 			    m_logfile << std::endl;
 			  }
