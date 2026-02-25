@@ -17,6 +17,9 @@ subsection Scenario
   # Type of convergence strategy for alternate minimization (Residual or Energy or SinglePass)
   set AM convergence strategy = Residual
   
+  # Phase-field model type (AT1 or AT2 or PFCZM)
+  set Phase-field model type = AT2
+  
   # If it is 2D case, is it plane-stress? (yes or no)
   set Plane stress = yes
 
