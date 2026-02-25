@@ -17,6 +17,9 @@ subsection Scenario
   # Type of convergence strategy for alternate minimization (Residual or Energy or SinglePass)
   set AM convergence strategy = Residual
   
+  # Phase-field model type (AT1 or AT2 or PFCZM)
+  set Phase-field model type = PFCZM
+
   # If it is 2D case, is it plane-stress? (yes or no)
   set Plane stress = yes
   
@@ -84,7 +87,7 @@ subsection Nonlinear solver
   set Max AM iteration = 10000
   
   # Number of Newton-Raphson iterations allowed
-  set Max iterations Newton-Raphson = 30
+  set Max iterations Newton-Raphson = 100
   
   # Displacement residual tolerance
   set Tolerance displacement residual       = 1.0e-6
