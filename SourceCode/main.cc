@@ -35,6 +35,7 @@
 //    In order to accomodate nonlinear degradation functions for PF-CZM, the phase-field subproblem
 //    is programmed as a nonlinear problem solved by the Newton-Raphson iterations. For AT-2 model,
 //    the nonlinear solver should converge in one step for the phase-field subproblem.
+// 8. Add the phase-field AT-1 cohesive model (Apr. 8th, 2026)
 
 #include <deal.II/grid/tria.h>
 #include <deal.II/grid/grid_generator.h>
@@ -515,6 +516,9 @@ namespace PhaseField
       unsigned int m_max_am_iteration;
       unsigned int m_max_iterations_newton;
 
+      double       m_tol_u_newton;
+      double       m_tol_d_newton;
+
       double       m_tol_u_residual;
       double       m_tol_d_residual;
       double       m_tol_u_incr;
@@ -546,6 +550,16 @@ namespace PhaseField
                           "Number of Newton-Raphson iterations allowed for "
                           "displacement subproblem");
 
+        prm.declare_entry("Newton tolerance for displacement subproblem",
+                          "1.0e-9",
+                          Patterns::Double(0.0),
+                          "Newton tolerance for displacement subproblem (nonlinear)");
+
+        prm.declare_entry("Newton tolerance for phase-field subproblem",
+                          "1.0e-9",
+                          Patterns::Double(0.0),
+                          "Newton tolerance for phase-field subproblem (nonlinear)");
+
         prm.declare_entry("Tolerance displacement residual",
                           "1.0e-9",
                           Patterns::Double(0.0),
@@ -575,6 +589,9 @@ namespace PhaseField
       {
         m_max_am_iteration = prm.get_integer("Max AM iteration");
         m_max_iterations_newton = prm.get_integer("Max iterations Newton-Raphson");
+
+        m_tol_u_newton = prm.get_double("Newton tolerance for displacement subproblem");
+        m_tol_d_newton = prm.get_double("Newton tolerance for phase-field subproblem");
 
         m_tol_u_residual = prm.get_double("Tolerance displacement residual");
         m_tol_d_residual = prm.get_double("Tolerance phasefield residual");
@@ -3606,7 +3623,7 @@ namespace PhaseField
       }
     else if (m_parameters.m_type_linear_solver == "CG")
       {
-	SolverControl            solver_control_phasefield(1e6, 1e-15);
+	SolverControl            solver_control_phasefield(1e6, 1e-12);
 	SolverCG<Vector<double>> cg_phasefield(solver_control_phasefield);
 
 	PreconditionJacobi<SparseMatrix<double>> preconditioner_phasefield;
@@ -3692,7 +3709,7 @@ namespace PhaseField
       }
     else if (m_parameters.m_type_linear_solver == "CG")
       {
-	SolverControl            solver_control_displacement(1e6, 1e-9);
+	SolverControl            solver_control_displacement(1e6, 1e-10);
 	SolverCG<Vector<double>> cg_displacement(solver_control_displacement);
 
 	PreconditionJacobi<SparseMatrix<double>> preconditioner_displacement;
@@ -3760,10 +3777,10 @@ namespace PhaseField
 
         get_error_residual_displacement(m_error_residual_displacement);
 
-        if (   (    newton_iteration > 0
-	         && m_error_residual_displacement.m_norm <= 1.0e-9 )
+        if (   (newton_iteration > 0
+	    && m_error_residual_displacement.m_norm < m_parameters.m_tol_u_newton)
             || (newton_iteration == m_parameters.m_max_iterations_newton)
-             //&& m_error_update_displacement.m_norm <= 1.0e-6
+          //&& m_error_update_displacement.m_norm < 1.0e-6
 	     )
           {
 	    if (m_parameters.m_output_iteration_history)
@@ -3817,10 +3834,10 @@ namespace PhaseField
 
         get_error_residual_phasefield(m_error_residual_phasefield);
 
-        if (   (   newton_iteration > 0
-	        && m_error_residual_phasefield.m_norm <= 1.0e-12)
+        if (   (newton_iteration > 0
+	    && m_error_residual_phasefield.m_norm < m_parameters.m_tol_d_newton)
             || (newton_iteration == m_parameters.m_max_iterations_newton)
-             //&& m_error_update_phasefield.m_norm <= 1.0e-6
+          //&& m_error_update_phasefield.m_norm < 1.0e-6
 	     )
           {
 	    if (m_parameters.m_output_iteration_history)
@@ -4205,6 +4222,13 @@ namespace PhaseField
 	  m_logfile << "2D plane-strain case" << std::endl;
       }
     m_logfile << "Linear solver type = " << m_parameters.m_type_linear_solver << std::endl;
+
+    m_logfile << "Newton-Raphson tolerance for displacement subproblem = "
+	      << m_parameters.m_tol_u_newton << std::endl;
+
+    m_logfile << "Newton-Raphson tolerance for phase-field subproblem = "
+    	      << m_parameters.m_tol_d_newton << std::endl;
+
     m_logfile << "Mesh refinement strategy = " << m_parameters.m_refinement_strategy << std::endl;
 
     if (m_parameters.m_refinement_strategy == "adaptive-refine")
