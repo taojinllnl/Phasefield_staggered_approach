@@ -4185,7 +4185,7 @@ namespace PhaseField
 	       << 0.0 << "\t"
 	       << 0.0 << std::endl;
 
-      for (auto const time_force : m_history_reaction_force)
+      for (auto const & time_force : m_history_reaction_force)
 	{
 	  myfile_reaction_force << time_force.first << "\t";
 	  if (dim == 2)
@@ -4210,7 +4210,7 @@ namespace PhaseField
 	            << 0.0 << "\t"
 	            << 0.0 << std::endl;
 
-      for (auto const time_energy : m_history_energy)
+      for (auto const & time_energy : m_history_energy)
 	{
 	  myfile_energy << std::fixed << std::setprecision(10) << std::scientific
 	                << time_energy.first     << "\t"
