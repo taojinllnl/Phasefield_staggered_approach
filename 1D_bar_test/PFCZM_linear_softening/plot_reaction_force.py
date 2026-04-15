@@ -5,7 +5,9 @@ import matplotlib.pyplot as plt
 
 
 time1, forceX1, forceY1 = np.loadtxt('Reaction_force.hist',
-                                              delimiter='\t', unpack=True)                                                    
+                                              delimiter='\t', unpack=True)            
+                                                                                      
+length = 200.0
 
 #time2, forceX2, forceY2 = np.loadtxt('Reaction_force_timestep_10-5.hist',
 #                                              delimiter='\t', unpack=True)      
@@ -14,27 +16,25 @@ font = {'size': 18}
 matplotlib.rc('font', **font)
 
 labels = []
-labels.append("Loading")
-labels.append("Unloading")
-
+labels.append("PFCZM (linear)")
 
 symbols = ['-xk', '--*m', '-.b^', ':gx', '-rD', 'bx']
 
 fig = plt.figure()
 ax = fig.add_subplot(111)
 
-plt.plot(time1, forceX1, symbols[0],
+plt.plot(time1/length*100, forceX1*1000, symbols[0],
          linewidth=2.0, label=labels[0], fillstyle='none', markersize=8)
 #plt.plot(time2, forceX2, symbols[1],
 #         linewidth=2.0, label=labels[1], fillstyle='none', markersize=8)   
 # plt.ticklabel_format(axis='y', style='sci', scilimits=(0, 3))
 # ax.yaxis.set_major_formatter(mtick.FormatStrFormatter('%.1e'))
 
-plt.xlabel('Pseudo time')
-plt.ylabel('Reaction force (kN)', multialignment='center')
-#plt.xlim(0,0.05)
-# plt.xticks(np.arange(0, 6, step=1))
-#plt.ylim(0.0, 1.0)
+plt.xlabel(r'Strain $\epsilon$ (%)')
+plt.ylabel(r'Stress $\sigma$ (MPa)', multialignment='center')
+plt.xlim(0, 0.1)
+#plt.yticks(np.arange(0, 3.0, step=3))
+plt.ylim(0.0, 3.5)
 # plt.legend( bbox_to_anchor=(2.4, 1.1),prop={'size':10})
 plt.grid()
 plt.legend()

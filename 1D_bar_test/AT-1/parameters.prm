@@ -25,7 +25,7 @@ subsection Scenario
   set Plane stress = yes
 
   # Linear solver type for B0 (Direct or CG)
-  set Linear solver type = CG
+  set Linear solver type = Direct
   
   # Mesh refinement strategy (pre-refine or adaptive-refine)
   set Mesh refinement strategy = pre-refine
@@ -88,7 +88,7 @@ subsection Nonlinear solver
   set Max AM iteration = 10000
 
   # Number of Newton-Raphson iterations allowed
-  set Max iterations Newton-Raphson = 10
+  set Max iterations Newton-Raphson = 30
 
   # Displacement residual tolerance
   set Tolerance displacement residual       = 1.0e-6
@@ -97,15 +97,15 @@ subsection Nonlinear solver
   set Tolerance phasefield residual         = 1.0e-9
   
   # Displacement increment tolerance
-  set Tolerance displacement increment      = 1.0e-3
+  set Tolerance displacement increment      = 1.0e-5
   
   # Phasefield increment tolerance
-  set Tolerance phasefield increment        = 1.0e-3
+  set Tolerance phasefield increment        = 1.0e-5
 end
 
 subsection Time
   # End time
-  set End time       = 0.60
+  set End time       = 0.20
   
   # Time data groups
   set Time data file = timeDataFile

@@ -7,12 +7,14 @@ import matplotlib.pyplot as plt
 time, strain_energy, crack_energy, total_energy = np.loadtxt('Energy.hist',
                                                               delimiter='\t', unpack=True)                                                    
 
+length = 200.0
+
 font = {'size': 12}
 matplotlib.rc('font', **font)
 
 labels = []
 labels.append('Strain energy')
-labels.append('Crack energy dissipation')
+labels.append('Crack energy')
 labels.append('Total energy')
 
 symbols = ['-k', '--m', '-.b^', ':gx', '-rD', 'bx']
@@ -20,20 +22,20 @@ symbols = ['-k', '--m', '-.b^', ':gx', '-rD', 'bx']
 fig = plt.figure()
 ax = fig.add_subplot(111)
 
-plt.plot(time, strain_energy, symbols[0],
+plt.plot(time/length*100, strain_energy*1000, symbols[0],
          linewidth=2.0, label=labels[0], fillstyle='none', markersize=8)   
-plt.plot(time, crack_energy, symbols[1],
+plt.plot(time/length*100, crack_energy*1000, symbols[1],
          linewidth=2.0, label=labels[1], fillstyle='none', markersize=8)   
-plt.plot(time, total_energy, symbols[2],
+plt.plot(time/length*100, total_energy*1000, symbols[2],
          linewidth=2.0, label=labels[2], fillstyle='none', markersize=8)   
 # plt.ticklabel_format(axis='y', style='sci', scilimits=(0, 3))
 # ax.yaxis.set_major_formatter(mtick.FormatStrFormatter('%.1e'))
 
-plt.xlabel('Displacement (mm)')
-plt.ylabel('Energy (J)', multialignment='center')
-plt.xlim(0,0.25)
+plt.xlabel(r'Strain $\epsilon$ (%)')
+plt.ylabel(r'Energy ($10^{-3}$ J)', multialignment='center')
+plt.xlim(0,0.1)
 # plt.xticks(np.arange(0, 6, step=1))
-#plt.ylim(0.0, 0.003)
+plt.ylim(0.0, 1.0)
 # plt.legend( bbox_to_anchor=(2.4, 1.1),prop={'size':10})
 plt.grid()
 plt.legend()

@@ -25,7 +25,7 @@ subsection Scenario
   set Plane stress = yes
 
   # Linear solver type for B0 (Direct or CG)
-  set Linear solver type = CG
+  set Linear solver type = Direct
   
   # Mesh refinement strategy (pre-refine or adaptive-refine)
   set Mesh refinement strategy = pre-refine
@@ -97,10 +97,10 @@ subsection Nonlinear solver
   set Tolerance phasefield residual         = 1.0e-9
   
   # Displacement increment tolerance
-  set Tolerance displacement increment      = 1.0e-3
+  set Tolerance displacement increment      = 1.0e-5
   
   # Phasefield increment tolerance
-  set Tolerance phasefield increment        = 1.0e-3
+  set Tolerance phasefield increment        = 1.0e-5
 end
 
 subsection Time
