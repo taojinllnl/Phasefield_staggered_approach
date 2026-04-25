@@ -299,6 +299,7 @@ namespace PhaseField
       bool m_output_iteration_history;
       std::string m_phasefield_name;
       std::string m_am_convergence_criterion;
+      double m_over_relaxation_omega;
       bool m_plane_stress;
       std::string m_type_linear_solver;
       std::string m_refinement_strategy;
@@ -349,6 +350,11 @@ namespace PhaseField
 			  "no",
 			  Patterns::Selection("yes|no"),
 			  "If it is 2D, is it plane-stress?");
+
+        prm.declare_entry("Over relaxation omega",
+        	          "1.0",
+        	          Patterns::Double(),
+        	          "Over relaxation omega value for accelerated staggered scheme");
 
         prm.declare_entry("Linear solver type",
                           "Direct",
@@ -419,6 +425,7 @@ namespace PhaseField
         m_output_iteration_history = prm.get_bool("Output iteration history");
         m_phasefield_name = prm.get("Phase-field model type");
         m_am_convergence_criterion = prm.get("AM convergence strategy");
+        m_over_relaxation_omega = prm.get_double("Over relaxation omega");
         m_plane_stress = prm.get_bool("Plane stress");
         m_type_linear_solver = prm.get("Linear solver type");
         m_refinement_strategy = prm.get("Mesh refinement strategy");
@@ -3839,6 +3846,10 @@ namespace PhaseField
     m_error_residual_displacement.reset();
     m_error_update_displacement.reset();
 
+    // It is IMPORTANT that newton_iteration at 0 (not 1), since
+    // it has an implication on the boundary conditions
+    // see make_constraints_displacement() and
+    // make_constraints_phasefield() for details
     unsigned int newton_iteration = 0;
     for (; newton_iteration <= m_parameters.m_max_iterations_newton; ++newton_iteration)
       {
@@ -3896,6 +3907,10 @@ namespace PhaseField
     m_error_residual_phasefield.reset();
     m_error_update_phasefield.reset();
 
+    // It is IMPORTANT that newton_iteration at 0 (not 1), since
+    // it has an implication on the boundary conditions
+    // see make_constraints_displacement() and
+    // make_constraints_phasefield() for details
     unsigned int newton_iteration = 0;
     for (; newton_iteration <= m_parameters.m_max_iterations_newton; ++newton_iteration)
       {
@@ -4331,6 +4346,13 @@ namespace PhaseField
 	else
 	  m_logfile << "2D plane-strain case" << std::endl;
       }
+
+    if (std::fabs(m_parameters.m_over_relaxation_omega - 1.0) < 1.0e-6 )
+      m_logfile << "No over-relaxation for staggered scheme." << std::endl;
+    else
+      m_logfile << "Over relaxation omega = " << m_parameters.m_over_relaxation_omega
+                << std::endl;
+
     m_logfile << "Linear solver type = " << m_parameters.m_type_linear_solver << std::endl;
 
     m_logfile << "Newton-Raphson tolerance for displacement subproblem = "
@@ -4628,10 +4650,24 @@ namespace PhaseField
 
 	    unsigned int linear_solve_needed = 0;
 
+	    double total_residual_l2_current = 0.0;
+	    double total_residual_l2_previous = 0.0;
+
+	    double phasefield_inc_l2 = 0.0;
+	    double phasefield_residual_l2 = 0.0;
+	    double displacement_inc_l2 = 0.0;
+	    double displacement_residual_l2 = 0.0;
+
+	    // It is IMPORTANT that iter_am starts at 1 (not 0), since
+	    // it has an implication on the boundary conditions
+	    // see make_constraints_displacement() and
+	    // make_constraints_phasefield() for details
 	    unsigned int iter_am = 1;
 
 	    for (; iter_am <= m_parameters.m_max_am_iteration; iter_am++)
 	      {
+		m_timer.enter_subsection("Outer-loop iterations");
+
 		if (m_parameters.m_output_iteration_history)
 		  m_logfile << '\t' << std::setw(4) << iter_am
 			    << std::flush;
@@ -4667,8 +4703,8 @@ namespace PhaseField
 			m_system_rhs_phasefield(i) = 0.0;
 		      }
 		  }
-		double phasefield_inc_l2 = solution_phasefield_diff.l2_norm();
-		double phasefield_residual_l2 = m_system_rhs_phasefield.l2_norm();
+	        phasefield_inc_l2 = solution_phasefield_diff.l2_norm();
+		phasefield_residual_l2 = m_system_rhs_phasefield.l2_norm();
 
 		for (unsigned int i = 0; i < m_dof_handler_displacement.n_dofs(); ++i)
 		  {
@@ -4678,8 +4714,79 @@ namespace PhaseField
 			m_system_rhs_displacement(i) = 0.0;
 		      }
 		  }
-		double displacement_inc_l2 = solution_displacement_diff.l2_norm();
-		double displacement_residual_l2 = m_system_rhs_displacement.l2_norm();
+		displacement_inc_l2 = solution_displacement_diff.l2_norm();
+		displacement_residual_l2 = m_system_rhs_displacement.l2_norm();
+
+		total_residual_l2_current
+		  = std::sqrt(  displacement_residual_l2 * displacement_residual_l2
+			      + phasefield_residual_l2 * phasefield_residual_l2 );
+
+		// Over-relaxation (if omega = 1.0, no relaxation)
+		// Because in the FIRST staggered iteration, inhomogeneous boundary conditions
+		// are applied, we take the full step (omega = 1.0) to properly enforce the
+		// increment of the boundary conditions. In the subsequent steps, all the increments
+		// at the Dirichlet BC are simply zero. Taking a scaled increment will not
+		// have any impact.
+		// If     the total residual increases
+		//    and this is not the first alternate iteration
+		//    and relaxation omega is not 1.0
+		// we apply relaxation and recalculate solution increment and residual
+		if (   total_residual_l2_current > total_residual_l2_previous
+		    && iter_am > 1
+		    && std::fabs(m_parameters.m_over_relaxation_omega - 1.0) > 1.0e-6 )
+		  {
+		    solution_displacement_diff = m_solution_displacement
+			                       - solution_displacement_prev_iter;
+		    solution_phasefield_diff = m_solution_phasefield
+			                     - solution_phasefield_prev_iter;
+		    // Relaxation
+		    solution_displacement_diff *= m_parameters.m_over_relaxation_omega;
+		    solution_phasefield_diff *= m_parameters.m_over_relaxation_omega;
+
+		    // Recover the solution at the beginning of the iteration
+		    m_solution_displacement = solution_displacement_prev_iter;
+		    m_solution_phasefield = solution_phasefield_prev_iter;
+
+		    update_qph_incremental(solution_displacement_diff,
+					   solution_phasefield_diff);
+
+		    m_solution_displacement += solution_displacement_diff;
+		    m_solution_phasefield += solution_phasefield_diff;
+
+		    // calculate the displacement residual
+		    assemble_rhs_displacement();
+
+		    // calculate the phase-field residual
+		    assemble_rhs_phasefield();
+
+		    for (unsigned int i = 0; i < m_dof_handler_phasefield.n_dofs(); ++i)
+		      {
+			if (m_constraints_phasefield.is_constrained(i))
+			  {
+			    solution_phasefield_diff(i) = 0.0;
+			    m_system_rhs_phasefield(i) = 0.0;
+			  }
+		      }
+		    phasefield_inc_l2 = solution_phasefield_diff.l2_norm();
+		    phasefield_residual_l2 = m_system_rhs_phasefield.l2_norm();
+
+		    for (unsigned int i = 0; i < m_dof_handler_displacement.n_dofs(); ++i)
+		      {
+			if (m_constraints_displacement.is_constrained(i))
+			  {
+			    solution_displacement_diff(i) = 0.0;
+			    m_system_rhs_displacement(i) = 0.0;
+			  }
+		      }
+		    displacement_inc_l2 = solution_displacement_diff.l2_norm();
+		    displacement_residual_l2 = m_system_rhs_displacement.l2_norm();
+
+		    total_residual_l2_current
+		      = std::sqrt(  displacement_residual_l2 * displacement_residual_l2
+				  + phasefield_residual_l2 * phasefield_residual_l2 );
+		  }
+
+		total_residual_l2_previous = total_residual_l2_current;
 
 		energy_functional_previous = energy_functional_current;
 		energy_functional_current = calculate_energy_functional();
@@ -4719,7 +4826,7 @@ namespace PhaseField
 					   * 45.0 / std::atan(1.0);
 
 		    solution_phasefield_diff = m_solution_phasefield - solution_phasefield_prev_iter;
-		    double phasefield_inc_l2 = solution_phasefield_diff.l2_norm();
+		    phasefield_inc_l2 = solution_phasefield_diff.l2_norm();
 		    if (m_parameters.m_output_iteration_history)
 		      {
 			m_logfile << std::endl;
@@ -4806,6 +4913,7 @@ namespace PhaseField
 				ExcMessage("Selected alternate minimization convergence"
 					   " strategy not implemented!"));
 		  }
+		m_timer.leave_subsection();
 	      } // 	for (; iter_am <= m_parameters.m_max_am_iteration; iter_am++)
 
 	    if (iter_am == m_parameters.m_max_am_iteration)
