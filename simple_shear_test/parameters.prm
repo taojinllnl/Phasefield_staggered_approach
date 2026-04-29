@@ -17,11 +17,21 @@ subsection Scenario
   # Type of convergence strategy for alternate minimization (Residual or Energy or SinglePass)
   set AM convergence strategy = Residual
   
-  # Phase-field model type (AT1 or AT2 or PFCZM)
+  # Phase-field model type (AT1 or AT1-Cohesive or AT2 or PFCZM)
   set Phase-field model type = AT2
   
   # If it is 2D case, is it plane-stress? (yes or no)
   set Plane stress = yes
+
+  # Over relaxation omega (1.0 means no relaxation)
+  set Over relaxation omega = 1.8
+
+  # Anderson acceleration depth (0 means no acceleration)
+  set Anderson acceleration depth = 2
+
+  # Switch from over-relaxation to Anderson acceleration 
+  # after the number steps of consecustive residual reduction
+  set Relaxation to Anderson acceleration switch = 5
 
   # Linear solver type (Direct or CG)
   set Linear solver type = CG
