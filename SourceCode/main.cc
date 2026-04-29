@@ -36,6 +36,7 @@
 //    is programmed as a nonlinear problem solved by the Newton-Raphson iterations. For AT-2 model,
 //    the nonlinear solver should converge in one step for the phase-field subproblem.
 // 8. Add the phase-field AT-1 cohesive model (Apr. 8th, 2026)
+// 9. Add the option for Anderson acceleration and over-relaxation (Apr. 27th, 2026)
 
 #include <deal.II/grid/tria.h>
 #include <deal.II/grid/grid_generator.h>
@@ -100,6 +101,60 @@
 namespace PhaseField
 {
   using namespace dealii;
+
+  void constrained_least_square(const std::list<Vector<double>> & delta_u_vector_list,
+  		                const std::list<Vector<double>> & delta_d_vector_list,
+  		                Vector<double> & alpha)
+  {
+    unsigned int matrix_size = delta_u_vector_list.size();
+
+    // F^T F is symmetric
+    FullMatrix<double> FtF_matrix(matrix_size);
+
+    const auto itr_delta_u_begin = delta_u_vector_list.begin();
+    const auto itr_delta_d_begin = delta_d_vector_list.begin();
+
+    // regularization
+    // The determinant of FtF_matrix is typically quite small
+    // because all the columns are incremental solution vectors.
+    // We should scale the FtF_matrix
+    const double scale = delta_u_vector_list.back()
+	               * delta_u_vector_list.back()
+		       + delta_d_vector_list.back()
+		       * delta_d_vector_list.back();
+
+    const double reg = 0.0e-9;
+    for (unsigned int i = 0; i < matrix_size; ++i)
+      {
+	for (unsigned int j = 0; j <= i; ++j)
+	  {
+	    FtF_matrix(i, j) = (*std::next(itr_delta_u_begin, i))
+			     * (*std::next(itr_delta_u_begin, j))
+			     + (*std::next(itr_delta_d_begin, i))
+			     * (*std::next(itr_delta_d_begin, j));
+
+	    FtF_matrix(i, j) /= scale;
+
+	    FtF_matrix(j, i) = FtF_matrix(i, j);
+	  }
+	FtF_matrix(i, i) += reg;
+      }
+
+    //std::cout << "Determinant = " << FtF_matrix.determinant() << std::endl;
+
+    FullMatrix<double> FtF_matrix_inv(matrix_size);
+    FtF_matrix_inv.invert(FtF_matrix);
+
+    Vector<double> ones(matrix_size);
+    ones = 0;
+    ones.add(1.0);
+
+    FtF_matrix_inv.vmult(alpha, ones, false);
+
+    const double sum_alpha = ones * alpha;
+
+    alpha /= sum_alpha;
+  }
 
   // body force
   template <int dim>
@@ -299,6 +354,9 @@ namespace PhaseField
       bool m_output_iteration_history;
       std::string m_phasefield_name;
       std::string m_am_convergence_criterion;
+      double m_over_relaxation_omega;
+      unsigned int m_anderson_depth;
+      unsigned int m_omega_aa_switch;
       bool m_plane_stress;
       std::string m_type_linear_solver;
       std::string m_refinement_strategy;
@@ -349,6 +407,23 @@ namespace PhaseField
 			  "no",
 			  Patterns::Selection("yes|no"),
 			  "If it is 2D, is it plane-stress?");
+
+        prm.declare_entry("Over relaxation omega",
+        	          "1.0",
+        	          Patterns::Double(),
+        	          "Over relaxation omega value for accelerated staggered scheme");
+
+        prm.declare_entry("Anderson acceleration depth",
+                          "0",
+                          Patterns::Integer(0),
+                          "The most recent m steps (depth) used for the Anderson acceleration. Zero"
+                          " means no acceleration.");
+
+        prm.declare_entry("Relaxation to Anderson acceleration switch",
+			  "5",
+			  Patterns::Integer(0),
+			  "If reidual is reduced CONSECUTIVELY for n steps, restart"
+			  " the Anderson acceleration");
 
         prm.declare_entry("Linear solver type",
                           "Direct",
@@ -419,6 +494,9 @@ namespace PhaseField
         m_output_iteration_history = prm.get_bool("Output iteration history");
         m_phasefield_name = prm.get("Phase-field model type");
         m_am_convergence_criterion = prm.get("AM convergence strategy");
+        m_over_relaxation_omega = prm.get_double("Over relaxation omega");
+        m_anderson_depth = prm.get_integer("Anderson acceleration depth");
+        m_omega_aa_switch = prm.get_integer("Relaxation to Anderson acceleration switch");
         m_plane_stress = prm.get_bool("Plane stress");
         m_type_linear_solver = prm.get("Linear solver type");
         m_refinement_strategy = prm.get("Mesh refinement strategy");
@@ -1335,8 +1413,299 @@ namespace PhaseField
 
     std::pair<double, double>
       calculate_total_strain_energy_and_crack_energy_dissipation() const;
+
+    void anderson_acceleration_step(std::list<Vector<double>> & delta_u_vector_list,
+				    std::list<Vector<double>> & delta_d_vector_list,
+				    std::list<Vector<double>> & u_vector_list,
+				    std::list<Vector<double>> & d_vector_list,
+				    Vector<double>            & solution_displacement_diff,
+				    Vector<double>            & solution_phasefield_diff,
+				    Vector<double>            & solution_displacement_anderson,
+				    Vector<double>            & solution_phasefield_anderson,
+    				    double                    & displacement_inc_l2,
+    				    double                    & displacement_residual_l2,
+    				    double                    & phasefield_inc_l2,
+    				    double                    & phasefield_residual_l2,
+    			            double                    & total_residual_l2_current,
+    			            double                    & energy_functional_current,
+				    const Vector<double>      & solution_displacement_prev_iter,
+				    const Vector<double>      & solution_phasefield_prev_iter);
+
+    void over_relaxation_step(Vector<double> & solution_displacement_diff,
+			      Vector<double> & solution_phasefield_diff,
+			      unsigned int   & linear_solve_needed,
+			      double         & displacement_inc_l2,
+			      double         & displacement_residual_l2,
+			      double         & phasefield_inc_l2,
+			      double         & phasefield_residual_l2,
+			      double         & total_residual_l2_current,
+			      double         & energy_functional_current,
+			      const Vector<double> & solution_displacement_prev_iter,
+			      const Vector<double> & solution_phasefield_prev_iter,
+			      const unsigned int iter_am);
+
   }; // class PhaseFieldSplitSolve
 
+  template <int dim>
+  void PhaseFieldSplitSolve<dim>::
+    anderson_acceleration_step(std::list<Vector<double>> & delta_u_vector_list,
+			       std::list<Vector<double>> & delta_d_vector_list,
+			       std::list<Vector<double>> & u_vector_list,
+			       std::list<Vector<double>> & d_vector_list,
+			       Vector<double>            & solution_displacement_diff,
+			       Vector<double>            & solution_phasefield_diff,
+			       Vector<double>            & solution_displacement_anderson,
+			       Vector<double>            & solution_phasefield_anderson,
+			       double                    & displacement_inc_l2,
+			       double                    & displacement_residual_l2,
+			       double                    & phasefield_inc_l2,
+			       double                    & phasefield_residual_l2,
+			       double                    & total_residual_l2_current,
+			       double                    & energy_functional_current,
+			       const Vector<double>      & solution_displacement_prev_iter,
+			       const Vector<double>      & solution_phasefield_prev_iter)
+  {
+    const double before_acceleration_residual = total_residual_l2_current;
+
+    solution_displacement_diff = m_solution_displacement
+	                       - solution_displacement_prev_iter;
+    solution_phasefield_diff = m_solution_phasefield
+	                     - solution_phasefield_prev_iter;
+    delta_u_vector_list.push_back(solution_displacement_diff);
+    delta_d_vector_list.push_back(solution_phasefield_diff);
+
+    bool print_anderson_step = false;
+
+    if (delta_u_vector_list.size() > 1 )
+      {
+	print_anderson_step = true;
+
+	Vector<double> alpha_vector(delta_u_vector_list.size());
+
+	constrained_least_square(delta_u_vector_list,
+				 delta_d_vector_list,
+				 alpha_vector);
+
+	solution_displacement_anderson = 0;
+	solution_phasefield_anderson = 0;
+
+	const auto itr_u_begin = u_vector_list.begin();
+	const auto itr_d_begin = d_vector_list.begin();
+	const unsigned int alpha_size = alpha_vector.size();
+
+	for (unsigned int i = 0; i < alpha_size-1; ++i)
+	  {
+	    solution_displacement_anderson += alpha_vector(i)
+					    * (*std::next(itr_u_begin, i));
+	    solution_phasefield_anderson   += alpha_vector(i)
+					    * (*std::next(itr_d_begin, i));
+	  }
+	solution_displacement_anderson += alpha_vector(alpha_size-1)
+					* m_solution_displacement;
+	solution_phasefield_anderson += alpha_vector(alpha_size-1)
+				      * m_solution_phasefield;
+
+	m_solution_displacement = solution_displacement_anderson;
+	m_solution_phasefield = solution_phasefield_anderson;
+
+	solution_displacement_diff = m_solution_displacement - solution_displacement_prev_iter;
+	solution_phasefield_diff = m_solution_phasefield - solution_phasefield_prev_iter;
+
+	// Since the solutions changed, the increments also change
+	delta_u_vector_list.pop_back();
+	delta_d_vector_list.pop_back();
+	delta_u_vector_list.push_back(solution_displacement_diff);
+	delta_d_vector_list.push_back(solution_phasefield_diff);
+
+	Vector<double> temp_solution_delta_displacement(m_dof_handler_displacement.n_dofs());
+        temp_solution_delta_displacement = 0.0;
+        Vector<double> temp_solution_delta_phasefield(m_dof_handler_phasefield.n_dofs());
+        temp_solution_delta_phasefield = 0.0;
+	update_qph_incremental(temp_solution_delta_displacement,
+			       temp_solution_delta_phasefield);
+
+	// calculate the displacement residual
+	assemble_rhs_displacement();
+
+	// calculate the phase-field residual
+	assemble_rhs_phasefield();
+
+	for (unsigned int i = 0; i < m_dof_handler_phasefield.n_dofs(); ++i)
+	  {
+	    if (m_constraints_phasefield.is_constrained(i))
+	      {
+		solution_phasefield_diff(i) = 0.0;
+		m_system_rhs_phasefield(i) = 0.0;
+	      }
+	  }
+	phasefield_inc_l2 = solution_phasefield_diff.l2_norm();
+	phasefield_residual_l2 = m_system_rhs_phasefield.l2_norm();
+
+	for (unsigned int i = 0; i < m_dof_handler_displacement.n_dofs(); ++i)
+	  {
+	    if (m_constraints_displacement.is_constrained(i))
+	      {
+		solution_displacement_diff(i) = 0.0;
+		m_system_rhs_displacement(i) = 0.0;
+	      }
+	  }
+	displacement_inc_l2 = solution_displacement_diff.l2_norm();
+	displacement_residual_l2 = m_system_rhs_displacement.l2_norm();
+
+	total_residual_l2_current
+	  = std::sqrt(  displacement_residual_l2 * displacement_residual_l2
+		      + phasefield_residual_l2 * phasefield_residual_l2 );
+
+	energy_functional_current = calculate_energy_functional();
+      } // if (delta_u_vector_list.size() > 1 )
+
+    u_vector_list.push_back(m_solution_displacement);
+    d_vector_list.push_back(m_solution_phasefield);
+
+    // The list is over-flow, we need to remove the oldest items
+    if (delta_u_vector_list.size() > m_parameters.m_anderson_depth)
+      {
+	delta_u_vector_list.pop_front();
+	delta_d_vector_list.pop_front();
+	u_vector_list.pop_front();
+	d_vector_list.pop_front();
+      }
+
+    if (   m_parameters.m_output_iteration_history
+	&& print_anderson_step)
+      {
+	if (total_residual_l2_current < before_acceleration_residual)
+	  m_logfile << "                "
+		    << "Anderson acceleration   "
+		    << "                      "
+		    << "                      "
+		    << std::setprecision(3)
+		    << std::setw(7)
+		    << std::scientific
+		    << displacement_residual_l2 << "  "
+		    << phasefield_residual_l2 << "  "
+		    << displacement_inc_l2 << "  "
+		    << phasefield_inc_l2 << "  "
+		    << std::fixed << std::setprecision(10) << std::scientific
+		    << energy_functional_current
+		    << std::endl;
+	else
+	  m_logfile << "                "
+	            << "Anderson acceleration (reject)  "
+		    << "                  "
+		    << "                  "
+		    << std::setprecision(3)
+		    << std::setw(7)
+		    << std::scientific
+		    << displacement_residual_l2 << "  "
+		    << phasefield_residual_l2 << "  "
+		    << displacement_inc_l2 << "  "
+		    << phasefield_inc_l2 << "  "
+		    << std::fixed << std::setprecision(10) << std::scientific
+		    << energy_functional_current
+		    << std::endl;
+      }
+  }
+
+  template <int dim>
+  void PhaseFieldSplitSolve<dim>::
+   over_relaxation_step(Vector<double> & solution_displacement_diff,
+  			Vector<double> & solution_phasefield_diff,
+  			unsigned int   & linear_solve_needed,
+  			double         & displacement_inc_l2,
+  			double         & displacement_residual_l2,
+  			double         & phasefield_inc_l2,
+  			double         & phasefield_residual_l2,
+  			double         & total_residual_l2_current,
+  			double         & energy_functional_current,
+  			const Vector<double> & solution_displacement_prev_iter,
+  			const Vector<double> & solution_phasefield_prev_iter,
+  			const unsigned int iter_am)
+  {
+    solution_displacement_diff = m_solution_displacement
+	                       - solution_displacement_prev_iter;
+    // Relaxation
+    solution_displacement_diff *= m_parameters.m_over_relaxation_omega;
+
+    // Recover the solution at the beginning of the iteration
+    m_solution_displacement = solution_displacement_prev_iter;
+    m_solution_phasefield = solution_phasefield_prev_iter;
+
+    solution_phasefield_diff = 0;
+    update_qph_incremental(solution_displacement_diff,
+    			   solution_phasefield_diff);
+
+    m_solution_displacement += solution_displacement_diff;
+
+    // Since the displacement field changed due to relaxation, we
+    // need to resolve phasefield
+    if (m_parameters.m_output_iteration_history)
+      m_logfile << "                "
+                   "Due to relaxation, resolve"
+                   "         "
+	           "PF-sub" << std::flush;
+    linear_solve_needed += phasefield_step(iter_am);
+
+    solution_phasefield_diff = m_solution_phasefield
+	                     - solution_phasefield_prev_iter;
+
+    // Relaxation
+    solution_phasefield_diff *= m_parameters.m_over_relaxation_omega;
+
+    Vector<double> temp_solution_delta_displacement(m_dof_handler_displacement.n_dofs());
+    temp_solution_delta_displacement = 0.0;
+
+    update_qph_incremental(temp_solution_delta_displacement,
+			   solution_phasefield_diff);
+
+    m_solution_phasefield += solution_phasefield_diff;
+
+    // calculate the displacement residual
+    assemble_rhs_displacement();
+
+    // calculate the phase-field residual
+    assemble_rhs_phasefield();
+
+    for (unsigned int i = 0; i < m_dof_handler_phasefield.n_dofs(); ++i)
+      {
+	if (m_constraints_phasefield.is_constrained(i))
+	  {
+	    solution_phasefield_diff(i) = 0.0;
+	    m_system_rhs_phasefield(i) = 0.0;
+	  }
+      }
+    phasefield_inc_l2 = solution_phasefield_diff.l2_norm();
+    phasefield_residual_l2 = m_system_rhs_phasefield.l2_norm();
+
+    for (unsigned int i = 0; i < m_dof_handler_displacement.n_dofs(); ++i)
+      {
+	if (m_constraints_displacement.is_constrained(i))
+	  {
+	    solution_displacement_diff(i) = 0.0;
+	    m_system_rhs_displacement(i) = 0.0;
+	  }
+      }
+    displacement_inc_l2 = solution_displacement_diff.l2_norm();
+    displacement_residual_l2 = m_system_rhs_displacement.l2_norm();
+
+    total_residual_l2_current
+      = std::sqrt(  displacement_residual_l2 * displacement_residual_l2
+		  + phasefield_residual_l2 * phasefield_residual_l2 );
+
+    energy_functional_current = calculate_energy_functional();
+
+    if (m_parameters.m_output_iteration_history)
+      {
+	m_logfile << "  "
+		  << displacement_residual_l2 << "  "
+		  << phasefield_residual_l2 << "  "
+		  << displacement_inc_l2 << "  "
+		  << phasefield_inc_l2 << "  "
+		  << std::fixed << std::setprecision(10) << std::scientific
+		  << energy_functional_current
+		  << std::endl;
+      }
+  }
 
   template <int dim>
   void PhaseFieldSplitSolve<dim>::get_error_residual_displacement(Errors &error_residual)
@@ -3839,6 +4208,10 @@ namespace PhaseField
     m_error_residual_displacement.reset();
     m_error_update_displacement.reset();
 
+    // It is IMPORTANT that newton_iteration at 0 (not 1), since
+    // it has an implication on the boundary conditions
+    // see make_constraints_displacement() and
+    // make_constraints_phasefield() for details
     unsigned int newton_iteration = 0;
     for (; newton_iteration <= m_parameters.m_max_iterations_newton; ++newton_iteration)
       {
@@ -3896,6 +4269,10 @@ namespace PhaseField
     m_error_residual_phasefield.reset();
     m_error_update_phasefield.reset();
 
+    // It is IMPORTANT that newton_iteration at 0 (not 1), since
+    // it has an implication on the boundary conditions
+    // see make_constraints_displacement() and
+    // make_constraints_phasefield() for details
     unsigned int newton_iteration = 0;
     for (; newton_iteration <= m_parameters.m_max_iterations_newton; ++newton_iteration)
       {
@@ -4331,6 +4708,28 @@ namespace PhaseField
 	else
 	  m_logfile << "2D plane-strain case" << std::endl;
       }
+
+    if (std::fabs(m_parameters.m_over_relaxation_omega - 1.0) < 1.0e-6 )
+      m_logfile << "No over-relaxation for staggered scheme (omega = 1.0)." << std::endl;
+    else
+      m_logfile << "Over relaxation omega = " << m_parameters.m_over_relaxation_omega
+                << std::endl;
+
+    m_logfile << "Anderson acceleration depth = " << m_parameters.m_anderson_depth
+	      << " (0 means no Anderson acceleration)." << std::endl;
+
+    if (m_parameters.m_anderson_depth > 0)
+      {
+	AssertThrow(m_parameters.m_omega_aa_switch > 0,
+	            ExcMessage("Anderson acceleration is activated, the switch "
+	        	"has to be a positive interger."));
+        m_logfile << "Relaxation to Anderson acceleration switch = "
+                  << m_parameters.m_omega_aa_switch << std::endl;
+        m_logfile << "\tResiduals have to reduce " << m_parameters.m_omega_aa_switch
+                  << " steps before Anderson acceleration is switched on."
+		  << std::endl;
+      }
+
     m_logfile << "Linear solver type = " << m_parameters.m_type_linear_solver << std::endl;
 
     m_logfile << "Newton-Raphson tolerance for displacement subproblem = "
@@ -4622,16 +5021,50 @@ namespace PhaseField
 	    Vector<double> solution_phasefield_diff(m_dof_handler_phasefield.n_dofs());
 	    Vector<double> solution_displacement_prev_iter(m_dof_handler_displacement.n_dofs());
 	    Vector<double> solution_displacement_diff(m_dof_handler_displacement.n_dofs());
+	    Vector<double> solution_displacement_anderson(m_dof_handler_displacement.n_dofs());
+	    Vector<double> solution_phasefield_anderson(m_dof_handler_phasefield.n_dofs());
+
 
 	    if (m_parameters.m_output_iteration_history)
 	      print_conv_header();
 
 	    unsigned int linear_solve_needed = 0;
 
+	    double total_residual_l2_current = 0.0;
+	    double total_residual_l2_previous = 0.0;
+
+	    double phasefield_inc_l2 = 0.0;
+	    double phasefield_residual_l2 = 0.0;
+	    double displacement_inc_l2 = 0.0;
+	    double displacement_residual_l2 = 0.0;
+
+	    // the oldest vector is at the front of the list
+	    // the newest vector is at the back of the list
+	    // [u1, u2, u3]
+	    //   ^       ^
+	    // front    back
+	    // The first iteration (iter_am = 1) should NOT participate
+	    // in either the relaxation or Anderson acceleration, since
+	    // this step contains the increment of the Dirichlet BC.
+	    std::list<Vector<double>> delta_u_vector_list;
+	    std::list<Vector<double>> delta_d_vector_list;
+	    std::list<Vector<double>> u_vector_list;
+	    std::list<Vector<double>> d_vector_list;
+
+	    // It is IMPORTANT that iter_am starts at 1 (not 0), since
+	    // it has an implication on the boundary conditions
+	    // see make_constraints_displacement() and
+	    // make_constraints_phasefield() for details
 	    unsigned int iter_am = 1;
+
+	    bool relaxation_flag = false;
+
+	    unsigned int consecutive_residual_reduction = 0;
 
 	    for (; iter_am <= m_parameters.m_max_am_iteration; iter_am++)
 	      {
+		m_timer.enter_subsection("Outer-loop iterations");
+
 		if (m_parameters.m_output_iteration_history)
 		  m_logfile << '\t' << std::setw(4) << iter_am
 			    << std::flush;
@@ -4667,8 +5100,8 @@ namespace PhaseField
 			m_system_rhs_phasefield(i) = 0.0;
 		      }
 		  }
-		double phasefield_inc_l2 = solution_phasefield_diff.l2_norm();
-		double phasefield_residual_l2 = m_system_rhs_phasefield.l2_norm();
+	        phasefield_inc_l2 = solution_phasefield_diff.l2_norm();
+		phasefield_residual_l2 = m_system_rhs_phasefield.l2_norm();
 
 		for (unsigned int i = 0; i < m_dof_handler_displacement.n_dofs(); ++i)
 		  {
@@ -4678,10 +5111,13 @@ namespace PhaseField
 			m_system_rhs_displacement(i) = 0.0;
 		      }
 		  }
-		double displacement_inc_l2 = solution_displacement_diff.l2_norm();
-		double displacement_residual_l2 = m_system_rhs_displacement.l2_norm();
+		displacement_inc_l2 = solution_displacement_diff.l2_norm();
+		displacement_residual_l2 = m_system_rhs_displacement.l2_norm();
 
-		energy_functional_previous = energy_functional_current;
+		total_residual_l2_current
+		  = std::sqrt(  displacement_residual_l2 * displacement_residual_l2
+			      + phasefield_residual_l2 * phasefield_residual_l2 );
+
 		energy_functional_current = calculate_energy_functional();
 
 		if (m_parameters.m_output_iteration_history)
@@ -4696,6 +5132,7 @@ namespace PhaseField
 			      << std::endl;
 		  }
 
+		// We should check convergence before relaxation or acceleration
 		if (m_parameters.m_am_convergence_criterion == "SinglePass")
 		  {
 		    if (m_parameters.m_output_iteration_history)
@@ -4719,7 +5156,7 @@ namespace PhaseField
 					   * 45.0 / std::atan(1.0);
 
 		    solution_phasefield_diff = m_solution_phasefield - solution_phasefield_prev_iter;
-		    double phasefield_inc_l2 = solution_phasefield_diff.l2_norm();
+		    phasefield_inc_l2 = solution_phasefield_diff.l2_norm();
 		    if (m_parameters.m_output_iteration_history)
 		      {
 			m_logfile << std::endl;
@@ -4747,11 +5184,6 @@ namespace PhaseField
 				  << " linear solves are required."
 				  << std::endl;
 			break;
-		      }
-		    else
-		      {
-			solution_phasefield_prev_iter = m_solution_phasefield;
-			solution_displacement_prev_iter = m_solution_displacement;
 		      }
 		  }
 		else if (m_parameters.m_am_convergence_criterion == "Residual")
@@ -4794,11 +5226,6 @@ namespace PhaseField
 
 			break;
 		      }
-		    else
-		      {
-			solution_phasefield_prev_iter = m_solution_phasefield;
-			solution_displacement_prev_iter = m_solution_displacement;
-		      }
 		  }
 		else
 		  {
@@ -4806,6 +5233,170 @@ namespace PhaseField
 				ExcMessage("Selected alternate minimization convergence"
 					   " strategy not implemented!"));
 		  }
+
+		// Combination Anderson acceleration and over-relaxation
+		// The first iteration (iter_am = 1) should not participate
+		// in either the relaxation or Anderson acceleration, since
+		// this step contains the increment of the Dirichlet BC.
+		// Because in the FIRST staggered iteration, inhomogeneous boundary conditions
+		// are applied, we take the full step (omega = 1.0) to properly enforce the
+		// increment of the boundary conditions. In the subsequent steps, all the increments
+		// at the Dirichlet BC are simply zero. Taking a scaled increment will not
+		// have any impact.
+		if (iter_am > 1)
+		  {
+		    m_timer.enter_subsection("Acceleration or relaxation");
+
+		    if (!relaxation_flag)
+		      {
+			if (total_residual_l2_current <= total_residual_l2_previous)
+			  {
+			    // Anderson acceleration or do nothing
+			    if (m_parameters.m_anderson_depth > 0)
+			      {
+				//Vector<double> solution_displacement_diff_backup = solution_displacement_diff;
+				//Vector<double> solution_phasefield_diff_backup = solution_phasefield_diff;
+				Vector<double> solution_displacement_backup = m_solution_displacement;
+				Vector<double> solution_phasefield_backup = m_solution_phasefield;
+				//double displacement_inc_l2_backup = displacement_inc_l2;
+				//double displacement_residual_l2_backup = displacement_residual_l2;
+				//double phasefield_inc_l2_backup = phasefield_inc_l2;
+				//double phasefield_residual_l2_backup = phasefield_residual_l2;
+				const double energy_functional_current_backup = energy_functional_current;
+				const double before_anderson_total_residual = total_residual_l2_current;
+
+				anderson_acceleration_step(delta_u_vector_list,
+							   delta_d_vector_list,
+							   u_vector_list,
+							   d_vector_list,
+							   solution_displacement_diff,
+							   solution_phasefield_diff,
+							   solution_displacement_anderson,
+							   solution_phasefield_anderson,
+							   displacement_inc_l2,
+							   displacement_residual_l2,
+							   phasefield_inc_l2,
+							   phasefield_residual_l2,
+							   total_residual_l2_current,
+							   energy_functional_current,
+							   solution_displacement_prev_iter,
+							   solution_phasefield_prev_iter);
+
+				// Anderson acceleration made the residual increase,
+				// switch to relaxtion in the following step
+				// recover the state before Anderson acceleration
+				if (total_residual_l2_current > before_anderson_total_residual)
+				  {
+				    relaxation_flag = true;
+				    m_solution_displacement = solution_displacement_backup;
+				    m_solution_phasefield = solution_phasefield_backup;
+				    energy_functional_current = energy_functional_current_backup;
+				    total_residual_l2_current = before_anderson_total_residual;
+				  }
+			      } // Anderson acceleration or do nothing
+			  } // total_residual_l2_current < total_residual_l2_previous
+			else
+			  {
+			    // Over-relaxation (if omega = 1.0, no relaxation, do nothing)
+			    // we apply relaxation and recalculate solution increment and residual
+			    if (std::fabs(m_parameters.m_over_relaxation_omega - 1.0) > 1.0e-6)
+			      {
+				over_relaxation_step(solution_displacement_diff,
+						     solution_phasefield_diff,
+						     linear_solve_needed,
+						     displacement_inc_l2,
+						     displacement_residual_l2,
+						     phasefield_inc_l2,
+						     phasefield_residual_l2,
+						     total_residual_l2_current,
+						     energy_functional_current,
+						     solution_displacement_prev_iter,
+						     solution_phasefield_prev_iter,
+						     iter_am);
+			      }
+
+			    // reset relaxation_flag
+			    relaxation_flag = true;
+			  }
+		      } // !relaxation_flag
+		    else
+		      {
+			if (   consecutive_residual_reduction < m_parameters.m_omega_aa_switch
+			    || total_residual_l2_current > total_residual_l2_previous )
+			  {
+			    if (total_residual_l2_current <= total_residual_l2_previous)
+			      ++consecutive_residual_reduction;
+			    else // consecutive reduction is interupted, recount
+			      consecutive_residual_reduction = 0;
+
+			    // Over-relaxation (if omega = 1.0, no relaxation, do nothing)
+			    // we apply relaxation and recalculate solution increment and residual
+			    // we only apply over-relaxation if the residuals goes up,
+			    // otherwise do nothing (a regular iteration step without relaxation or
+			    // acceleration)
+			    if (   std::fabs(m_parameters.m_over_relaxation_omega - 1.0) > 1.0e-6
+				&& total_residual_l2_current > total_residual_l2_previous)
+			      {
+				over_relaxation_step(solution_displacement_diff,
+						     solution_phasefield_diff,
+						     linear_solve_needed,
+						     displacement_inc_l2,
+						     displacement_residual_l2,
+						     phasefield_inc_l2,
+						     phasefield_residual_l2,
+						     total_residual_l2_current,
+						     energy_functional_current,
+						     solution_displacement_prev_iter,
+						     solution_phasefield_prev_iter,
+						     iter_am);
+			      }
+			  }
+			else
+			  {
+			    // Anderson acceleration or do nothing
+			    if (m_parameters.m_anderson_depth > 0)
+			      {
+				// restart Anderson acceleration
+				delta_u_vector_list.clear();
+				delta_d_vector_list.clear();
+				u_vector_list.clear();
+				d_vector_list.clear();
+
+				anderson_acceleration_step(delta_u_vector_list,
+							   delta_d_vector_list,
+							   u_vector_list,
+							   d_vector_list,
+							   solution_displacement_diff,
+							   solution_phasefield_diff,
+							   solution_displacement_anderson,
+							   solution_phasefield_anderson,
+							   displacement_inc_l2,
+							   displacement_residual_l2,
+							   phasefield_inc_l2,
+							   phasefield_residual_l2,
+							   total_residual_l2_current,
+							   energy_functional_current,
+							   solution_displacement_prev_iter,
+							   solution_phasefield_prev_iter);
+			      } // Anderson acceleration or do nothing
+
+			    // reset relaxation_flag
+			    relaxation_flag = false;
+
+			    // reset consecutive residual reduction count
+			    consecutive_residual_reduction = 0;
+			  }
+		      } // relaxation_flag == true
+
+		    m_timer.leave_subsection();
+		  } // iter_am > 1
+
+		total_residual_l2_previous = total_residual_l2_current;
+		energy_functional_previous = energy_functional_current;
+		solution_phasefield_prev_iter = m_solution_phasefield;
+		solution_displacement_prev_iter = m_solution_displacement;
+
+		m_timer.leave_subsection();
 	      } // 	for (; iter_am <= m_parameters.m_max_am_iteration; iter_am++)
 
 	    if (iter_am == m_parameters.m_max_am_iteration)
@@ -4870,7 +5461,6 @@ namespace PhaseField
       } //     while(m_time.current() < m_time.end() - m_time.get_delta_t()*1.0e-6)
   }
 } // namespace PhaseField
-
 
 int main(int argc, char* argv[])
 {
