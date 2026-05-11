@@ -1934,7 +1934,7 @@ namespace PhaseField
                                    m_dof_handler_phasefield.end())),
         worker, copier, scratch_data_UQPH, per_task_data_UQPH);
 
-    m_timer.leave_subsection();
+    m_timer.leave_subsection("Update QPH data");
   }
 
   template <int dim> struct PhaseFieldSplitSolve<dim>::PerTaskData_UQPH
@@ -2895,7 +2895,7 @@ namespace PhaseField
 
     setup_qph();
 
-    m_timer.leave_subsection();
+    m_timer.leave_subsection("Setup system");
   }
 
   template <int dim> void PhaseFieldSplitSolve<dim>::setup_system_phasefield()
@@ -3413,7 +3413,7 @@ namespace PhaseField
     WorkStream::run(m_dof_handler_phasefield.active_cell_iterators(), worker,
                     copier, scratch_data, per_task_data);
 
-    m_timer.leave_subsection();
+    m_timer.leave_subsection("Assemble phase field system");
   }
 
   template <int dim> void PhaseFieldSplitSolve<dim>::assemble_rhs_phasefield()
@@ -3445,7 +3445,7 @@ namespace PhaseField
     WorkStream::run(m_dof_handler_phasefield.active_cell_iterators(), worker,
                     copier, scratch_data, per_task_data);
 
-    m_timer.leave_subsection();
+    m_timer.leave_subsection("Calculate phase-field residual");
   }
 
   template <int dim>
@@ -3568,7 +3568,7 @@ namespace PhaseField
     WorkStream::run(m_dof_handler_displacement.active_cell_iterators(), worker,
                     copier, scratch_data, per_task_data);
 
-    m_timer.leave_subsection();
+    m_timer.leave_subsection("Assemble displacement system");
   }
 
   template <int dim>
@@ -3707,7 +3707,7 @@ namespace PhaseField
     WorkStream::run(m_dof_handler_displacement.active_cell_iterators(), worker,
                     copier, scratch_data, per_task_data);
 
-    m_timer.leave_subsection();
+    m_timer.leave_subsection("Calculate displacement residual");
   }
 
   template <int dim>
@@ -3868,7 +3868,7 @@ namespace PhaseField
 
     m_constraints_phasefield.distribute(newton_update);
 
-    m_timer.leave_subsection();
+    m_timer.leave_subsection("Solve phase-field linear system");
   }
 
   template <int dim>
@@ -3959,7 +3959,7 @@ namespace PhaseField
 
     m_constraints_displacement.distribute(newton_update);
 
-    m_timer.leave_subsection();
+    m_timer.leave_subsection("Solve displacement linear system");
     // return linear_solver_parameters;
   }
 
@@ -4173,7 +4173,7 @@ namespace PhaseField
                          ".vtu");
 
     data_out.write_vtu(output);
-    m_timer.leave_subsection();
+    m_timer.leave_subsection("Output results");
   }
 
   template <int dim>
@@ -4323,7 +4323,7 @@ namespace PhaseField
     time_force.second = reaction_force;
     m_history_reaction_force.push_back(time_force);
 
-    m_timer.leave_subsection();
+    m_timer.leave_subsection("Calculate reaction force");
   }
 
   template <int dim> void PhaseFieldSplitSolve<dim>::write_history_data()
@@ -4791,6 +4791,8 @@ namespace PhaseField
     setup_system();
     output_results();
 
+    unsigned int total_outer_loop_iters = 0;
+
     while (m_time.current() < m_time.end() - m_time.get_delta_t() * 1.0e-6)
     {
       m_time.increment(time_table);
@@ -4870,8 +4872,6 @@ namespace PhaseField
 
         for (; iter_am <= m_parameters.m_max_am_iteration; iter_am++)
         {
-          m_timer.enter_subsection("Outer-loop iterations");
-
           if (m_parameters.m_output_iteration_history)
             m_logfile << '\t' << std::setw(4) << iter_am << std::flush;
 
@@ -4940,6 +4940,8 @@ namespace PhaseField
           // We should check convergence before relaxation or acceleration
           if (m_parameters.m_am_convergence_criterion == "SinglePass")
           {
+            total_outer_loop_iters += iter_am;
+
             if (m_parameters.m_output_iteration_history)
             {
               m_logfile << '\t';
@@ -4987,6 +4989,9 @@ namespace PhaseField
                   m_logfile << '_';
                 m_logfile << std::endl;
               }
+
+              total_outer_loop_iters += iter_am;
+
               m_logfile << "\tAlternate minimization converges after " << iter_am
                         << " iterations based on the "
                         << m_parameters.m_am_convergence_criterion
@@ -5012,6 +5017,8 @@ namespace PhaseField
                   m_logfile << '_';
                 m_logfile << std::endl;
               }
+
+              total_outer_loop_iters += iter_am;
 
               m_logfile << "\tAlternate minimization converges after " << iter_am
                         << " iterations based on the "
@@ -5183,15 +5190,13 @@ namespace PhaseField
               }
             } // relaxation_flag == true
 
-            m_timer.leave_subsection();
+            m_timer.leave_subsection("Acceleration or relaxation");
           } // iter_am > 1
 
           total_residual_l2_previous = total_residual_l2_current;
           energy_functional_previous = energy_functional_current;
           solution_phasefield_prev_iter = m_solution_phasefield;
           solution_displacement_prev_iter = m_solution_displacement;
-
-          m_timer.leave_subsection();
         } // 	for (; iter_am <= m_parameters.m_max_am_iteration; iter_am++)
 
         if (iter_am == m_parameters.m_max_am_iteration)
@@ -5261,6 +5266,9 @@ namespace PhaseField
 
       write_history_data();
     } //     while(m_time.current() < m_time.end() - m_time.get_delta_t()*1.0e-6)
+
+    m_logfile << "Totally " << total_outer_loop_iters << " outer-loop iterations "
+            "are used in the simulation." << std::endl;
   }
 } // namespace PhaseField
 
