@@ -1501,6 +1501,8 @@ namespace PhaseField
     // Relaxation
     solution_phasefield_diff *= m_parameters.m_over_relaxation_omega;
 
+    m_solution_phasefield = solution_phasefield_prev_iter;
+
     Vector<double> temp_solution_delta_displacement(
         m_dof_handler_displacement.n_dofs());
     temp_solution_delta_displacement = 0.0;
